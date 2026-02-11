@@ -1,0 +1,1855 @@
+#!/bin/bash
+#
+# kcbench - kernel compile benchmark
+# Copyright (c) 2007-2020 Thorsten Leemhuis <linux@leemhuis.info>
+#
+# Permission is hereby granted, free of charge, to any person obtaining
+# a copy of this software and associated documentation files (the
+# "Software"), to deal in the Software without restriction, including
+# without limitation the rights to use, copy, modify, merge, publish,
+# distribute, sublicense, and/or sell copies of the Software, and to
+# permit persons to whom the Software is furnished to do so, subject to
+# the following conditions:
+#
+# The above copyright notice and this permission notice shall be
+# included in all copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+# EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+# MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+# NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE
+# LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+# OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
+# WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+#
+#
+# Disclaimer: Like many other scripts, this started quite small and grew over time -- quite a lot in fact.
+# Maybe it should have been rewritten in something like python at some point, but otoh: bash is kind of a
+# lingua franca and therefore might be the best choice for this task.
+#
+# Some hints for reading this script:
+# * global variables start with KCB_
+# * global variables with input from user start with KCBUSR_
+# * due to lack of return values kcbench_init_real uses a ugly hack in some places (sorry)
+
+# put some info about this script right here
+KCB_prog_vers=0.9.10
+
+kcbench_echo ()
+{
+	# $1 == must be 1 for stdout and 2 for stderr
+	# $2 == verboselevel
+
+	# get quickly out of here if we won't print anything anyway
+	if (( KCB_verbose_level >= ${2} )) || (( ${1} == 2 )); then
+		local this_fd="${1}"
+		shift
+
+		local this_verbose_level="${1}"
+		shift
+
+		if [[ "${1}" == "-n" ]]; then
+			local this_nonewline="${1}"
+			shift
+		fi
+
+		# add pretext
+		case "${this_verbose_level}" in
+		3|4)
+			local this_verbose_desc="[INFO] "
+			;;
+		5)
+			local this_verbose_desc="[DEBG] "
+			;;
+		esac
+
+		# finally print
+		echo ${this_nonewline:+${this_nonewline} }"${this_verbose_desc}$*" >& "${this_fd}"
+		if [[ "${KCBUSR_logfile}" ]] ; then
+			echo ${this_nonewline:+${this_nonewline} }"$*" >> "${KCBUSR_logfile}" || :
+		fi
+	fi
+}
+
+kcbench_exit()
+{
+
+	# end all backgroud work
+	if pkill -P $$ ; then
+		# wait a short moment for things to clean up
+		echo waiting for worker to clean up
+		sleep 0.25
+	fi
+
+	if [[ "${KCB_compile_output}" ]] && [[ -d "${KCB_compile_output}" ]]; then
+		# the directory name should contain the name of this script, better check it to be on the safe side
+		if [[ "${KCB_compile_output}" != "${KCB_compile_output%%/${KCB_prog_name}*}" ]] ; then
+			kcbench_echo 1 4 "Removing ${KCB_compile_output}"
+			rm -rf "${KCB_compile_output:?}"
+		else
+			kcbench_echo 1 1 "Leaving ${KCB_compile_output} behind, does not like we created it"
+		fi
+	fi
+
+	echo
+	exit "${1}"
+}
+
+
+kcbench_parse_cmdline_parmissing()
+{
+	echo "Error: Please provide a parameter to ${1} (seperated by a space)." >&2
+	echo
+	kcbench_help >&2
+	exit 1
+}
+
+
+# set some defaults -- called before cmdoptions are parsed
+kcbench_init_basic ()
+{
+	if [[ "${0##*/}" == "kcbenchrate" ]]; then
+		KCB_prog_name=kcbenchrate
+	else
+		KCB_prog_name=kcbench
+	fi
+
+
+	# default verbose level
+	KCB_verbose_level=2
+
+
+	# fill caches by default
+	KCB_cachefillrun="true"
+
+
+	# by default create this configuraiton
+	KCB_target_config="defconfig"
+
+	# results are normally quite stable, thus go for 2 instead of 3 runs
+	KCB_iterations=2
+
+
+	# Download this version by default:
+	KCB_default_linux_compiled="6.8"
+
+
+	# now it gets a bit complicated (sorry!):
+	#
+	# determine how many jobs to use by default (make -j #). Most processors will perform best when
+	# 'number of CPU cores == number of jobs'. But sometimes having a few more jobs arround will
+	# perform better, as it will reduce the fork and I/O delay for new jobs spawned. On the other
+	# hand, on some processors with SMT it can be better to just utilize only the real cores or
+	# just the real cores plus a few more for abovementioned reasons. That's why kcbench will try
+	# at least to different settings and and SMT capable systems sometmes 3 or 4
+	#
+	# See man page for results that show why this is done.
+	#
+	# Below code will result in something like this:
+	#
+	#                             Cores: Default # of jobs
+	#                             1 CPU: 1 2
+	#           2 CPUs (    no SMT    ): 2 3
+	#           2 CPUs (2 threads/core): 2 3 1
+	#           4 CPUs (    no SMT    ): 4 6
+	#           4 CPUs (2 threads/core): 4 6 2
+	#           6 CPUs (    no SMT    ): 6 9
+	#           6 CPUs (2 threads/core): 6 9 3
+	#           8 CPUs (    no SMT    ): 8 11
+	#           8 CPUs (2 threads/core): 8 11 4 6
+	#          12 CPUs (    no SMT    ): 12 16
+	#          12 CPUs (2 threads/core): 12 16 6 9
+	#          16 CPUs (    no SMT    ): 16 20
+	#          16 CPUs (2 threads/core): 16 20 8 11
+	#          20 CPUs (    no SMT    ): 20 25
+	#          20 CPUs (2 threads/core): 20 25 10 14
+	#          24 CPUs (    no SMT    ): 24 29
+	#          24 CPUs (2 threads/core): 24 29 12 16
+	#          28 CPUs (    no SMT    ): 28 34
+	#          28 CPUs (2 threads/core): 28 34 14 18
+	#          32 CPUs (    no SMT    ): 32 38
+	#          32 CPUs (2 threads/core): 32 38 16 20
+	#          32 CPUs (4 threads/core): 32 38 8 11
+	#          48 CPUs (    no SMT    ): 48 55
+	#          48 CPUs (2 threads/core): 48 55 24 29
+	#          48 CPUs (4 threads/core): 48 55 12 16
+	#          64 CPUs (    no SMT    ): 64 72
+	#          64 CPUs (2 threads/core): 64 72 32 38
+	#          64 CPUs (4 threads/core): 64 72 16 20
+	#         128 CPUs (    no SMT    ): 128 140
+	#         128 CPUs (2 threads/core): 128 140 64 72
+	#         128 CPUs (4 threads/core): 128 140 32 38
+	#         256 CPUs (    no SMT    ): 256 272
+	#         256 CPUs (2 threads/core): 256 272 128 140
+	#         256 CPUs (4 threads/core): 256 272 64 72
+	#
+	# for reference: to create the table above you can use a script like this:
+	#
+	# determinejobs()
+	# {
+	#	local number_of_cores_threads="${1}"
+	#	local number_of_cores_real="${2}"
+	#
+	#	 #!- Place code from above here, but remove the lscpu calls -!#
+	# }
+	#
+	# printf "# %32s: %s\n" "Cores" "Default # of jobs"
+	# for j in 2 4 6 8 12 16 20 24 28 32 48 64 128 256; do
+	# 	for i in 1 2 4 ; do
+	# 		determinejobs ${j} ${i}
+	# 		case ${i} in
+	# 		1)
+	# 			printf "# %32s: %s\n" "${j} CPUs (    no SMT    )" "${KCB_default_jobs}"
+	# 			;;
+	# 		2)
+	# 			printf "# %32s: %s\n" "${j} CPUs (2 threads/core)" "${KCB_default_jobs}"
+	# 			;;
+	# 		4)
+	# 			(( ${j} < 32 )) && continue
+	# 			printf "# %32s: %s\n" "${j} CPUs (4 threads/core)" "${KCB_default_jobs}"
+	# 			;;
+	# 		esac
+	# 	done
+	# done
+	#
+	#
+	# With that out of the way let's finally start
+	#
+	# this code will calculate the square root from the number of all CPU cores and set a sane default
+	local number_of_cores_threads
+	number_of_cores_threads="$(LC_ALL=C lscpu | grep -m 1 'CPU(s):' | cut -d : -f 2)"
+	local oversubscribe_all=1
+	if (( number_of_cores_threads > 2 )); then
+		while (( $(( oversubscribe_all * oversubscribe_all )) < number_of_cores_threads )); do
+			(( oversubscribe_all += 1 ))
+		done
+	fi
+	if (( oversubscribe_all > 2 )); then
+		 (( oversubscribe_all -= 1 ))
+	fi
+	KCB_default_jobs="$(( number_of_cores_threads )) $(( number_of_cores_threads + oversubscribe_all  ))"
+
+	# used as default in various places where it does not matter
+	KCB_nprocall="$(( number_of_cores_threads ))"
+
+
+	# Download this version by default:
+	KCB_default_workers="$(( number_of_cores_threads ))"
+
+
+	# do the square root dance again if the CPU has SMT:
+	local number_of_cores_real
+	number_of_cores_real=$(( number_of_cores_threads / $(LC_ALL=C lscpu | grep -m 1 'Thread(s) per core:' | cut -d : -f 2) ))
+	if ! (( number_of_cores_threads == number_of_cores_real )); then
+		local oversubscribe_real=1
+		if (( number_of_cores_threads > 2 )); then
+			while (( $(( oversubscribe_real * oversubscribe_real )) < number_of_cores_real )); do
+				(( oversubscribe_real += 1 ))
+			done
+		fi
+		KCB_default_jobs="${KCB_default_jobs} ${number_of_cores_real}"
+
+		# only on processors with a certain # CPUs the 'number_of_cores_threads + oversubscribe_real' will
+		# be really different from  'number_of_cores_threads + oversubscribe_real'
+		if (( number_of_cores_threads >= 8 )); then
+			KCB_default_jobs="${KCB_default_jobs} $(( number_of_cores_real + oversubscribe_real ))"
+		fi
+	fi
+
+	# cleanup
+	unset number_of_allcores number_of_realcores oversubscribe_all oversubscribe_real
+
+
+	# provide a default for the cross compiler naming scheme
+	if [[ ! "${KCBUSR_crosscomp_scheme}" ]]; then
+		case "$(grep -- "^ID=" /etc/os-release 2>/dev/null || :)" in
+		ID=debian)
+			KCBUSR_crosscomp_scheme="debian" ;;
+		ID=fedora)
+			KCBUSR_crosscomp_scheme="fedora" ;;
+		ID=redhat|ID=centos)
+			KCBUSR_crosscomp_scheme="redhat" ;;
+		ID=ubuntu)
+			KCBUSR_crosscomp_scheme="ubuntu" ;;
+		*)
+			KCBUSR_crosscomp_scheme="generic" ;;
+		esac
+	fi
+
+	# retrieve additional settings from config file (undocumented)
+	if [[ -e "${HOME}/.config/kcbench" ]]; then
+		source "${HOME}/.config/kcbench"
+	fi
+}
+
+kcbench_init_real_checktools()
+{
+	local checktools_compiler=( "$@" )
+
+	local errormsg=""
+
+	# check for common tools
+	local tool
+	for tool in bc bison flex lscpu make /usr/bin/time openssl perl pkg-config pkill ${checktools_compiler[@]}; do
+		if ! type "${tool}" &> /dev/null ; then
+			errormsg="${errormsg}* Please install the executable ${tool}"$'\n'
+		fi
+	done
+
+	# check for libs we need
+	if type pkg-config &> /dev/null && ! pkg-config --modversion libelf &> /dev/null; then
+		errormsg="${errormsg}* Please install libelf header files (often shipped in packages libelf-dev, libelf-devel or elfutils-libelf-devel)"$'\n'
+	fi
+	if type pkg-config &> /dev/null && ! pkg-config --modversion libssl &> /dev/null; then
+		errormsg="${errormsg}* Please install libssl header files (often shipped in packages like libssl-dev, libssl-devel or openssl-devel)"$'\n'
+	fi
+
+	# in case of an error do some addional checks before printing it
+	if [[ "${errormsg}" ]] ; then
+		# only check those here and provide a runtime error if they are not installed, as they are optional
+		if type curl &> /dev/null ; then
+			:
+		elif type wget &> /dev/null ; then
+			:
+		else
+			errormsg="${errormsg}* Optional: Install either curl or wget if you want to automatically download Linux kernel sources to compile"$'\n'
+		fi
+		for tool in gunzip tar unxz; do
+			if ! type "${tool}" &> /dev/null ; then
+				errormsg="${errormsg}* Optional: Install ${tool} if you want to automatically download Linux kernel sources to compile"$'\n'
+			fi
+		done
+
+		# all checks finally done now
+		kcbench_echo 2 1 "Requirements not met:"
+		kcbench_echo 2 1 "${errormsg}"
+
+		if [[ "${KCBUSR_cross_compile}" ]] && [[ ! "${KCBUSR_crosscomp_scheme}" == "generic"  ]]; then
+			kcbench_echo 2 1 "Your distributions package manager should be able to install the needed cross-compilers. If you want to use others, set '--crosscomp-scheme=generic' to search for them or set everything needed throug ARCH= and CROSS_COMPILE=."
+		fi
+
+		kcbench_echo 2 1 "Aborting ${KCB_prog_name}."
+		kcbench_exit 2
+	fi
+}
+
+kcbench_init_real_decideversion()
+{
+	local decidever_compiltertype="${1}"
+
+	if [[ "${decidever_compiltertype}" == "GCC" ]]; then
+		case "${2}" in
+		14)
+			KCBTMP_linux_compiled="6.8"
+			;;
+		13)
+			KCBTMP_linux_compiled="6.1"
+			;;
+		12)
+			KCBTMP_linux_compiled="5.15"
+			;;
+		11|10)
+			KCBTMP_linux_compiled="5.7"
+			;;
+		9)
+			KCBTMP_linux_compiled="4.19"
+			;;
+		8|7|6|5|4)
+			KCBTMP_linux_compiled="4.14"
+			;;
+		esac;
+	elif [[ "${decidever_compiltertype}" == "CLANG" ]]; then
+		case "${2}" in
+		18)
+			KCBTMP_linux_compiled="6.8"
+			;;
+		17)
+			KCBTMP_linux_compiled="6.5"
+			;;
+		16)
+			KCBTMP_linux_compiled="6.1"
+			;;
+		15|14|13)
+			KCBTMP_linux_compiled="5.15"
+			;;
+		12)
+			KCBTMP_linux_compiled="5.10"
+			;;
+		11|10|9)
+			KCBTMP_linux_compiled="5.7"
+			;;
+		esac;
+	fi
+
+	if [[ ! "${KCBTMP_linux_compiled}" ]]; then
+		kcbench_echo 2 1 -n "Warning: Could not find a default version to compile for your system. "
+		kcbench_echo 2 1 -n "Will use Linux kernel ${KCB_default_linux_compiled}. Please report this and the output of "
+		kcbench_echo 2 1 "'${KCBUSR_compiler_target:-${CROSS_COMPILE}${KCB_default_compiler}} -dumpversion' to linux@leemhuis.info. tia!"
+		KCBTMP_linux_compiled=${KCB_default_linux_compiled}
+		sleep 2
+	fi
+}
+
+
+
+kcbench_init_real_findsrctree()
+{
+	# search for Linux sources to compile in these places; note: /usr/src/ is not
+	# considered here on purpose: kernels sources found there might be modified
+	local default_sources_dir_sys="/usr/share/kcbench/"
+	local default_sources_dir_home="${XDG_CACHE_HOME:-${HOME}/.cache}/kcbench/"
+
+	# for proper error messages we need to differentiate if the input was provided by the user
+	if [[ "${1}" ]]; then
+		local userprovided=true
+		local searchstring="${1}"
+	elif [[ ! "${1}" ]] && [[ ! "${2}" ]] ; then
+		kcbench_echo 2 1  "Script error, kcbench_init_real_findsrctree was called without any options. Aborting ${KCB_prog_name}."
+		kcbench_exit 1
+	else
+		local searchstring="${2}"
+	fi
+
+	# go
+	if [[ "${userprovided}" ]] && [[ -d "${searchstring}" ]]; then
+		# user provided a local directory
+		if [[ -e "${searchstring}/include/linux/kernel.h" ]] ; then
+			# make sure we have its full path
+			if [[ "${searchstring}" == "${searchstring##/}" ]]; then
+				KCB_linux_sources="${PWD}/${searchstring}"
+			else
+				KCB_linux_sources="${searchstring}"
+			fi
+		else
+			kcbench_echo 2 1 "The directory ${searchstring} doesn't look like it's holding a Linux source tree. Aborting ${KCB_prog_name}."
+			kcbench_exit 1
+		fi
+	elif [[ -e "${default_sources_dir_home}/linux-${searchstring}/include/linux/kernel.h" ]]; then
+		# use a tree already prepared and detected by the version number given
+		KCB_linux_sources="${default_sources_dir_home%%/}/linux-${searchstring%%/}/"
+	elif [[ -e "${default_sources_dir_sys}/linux-${searchstring}/include/linux/kernel.h" ]]; then
+		# use a tree already prepared and detected by the version number given
+		KCB_linux_sources="${default_sources_dir_sys%%/}/linux-${searchstring%%/}/"
+	else
+		# only remaining option: download
+		if [[ "${KCB_noautodownloads}" ]]; then
+			if [[ "${userprovided}" ]]; then
+				kcbench_echo 2 1 "Could not find a source tree to compile in ${searchstring}, ${default_sources_dir_home}/linux-${searchstring}/ or ${default_sources_dir_sys}/linux-${searchstring}/; please specify one or allow auto-downloads."
+			else
+				kcbench_echo 2 1 "Could not find a source tree to compile in ${default_sources_dir_home}/linux-${searchstring}/ or ${default_sources_dir_sys}/linux-${searchstring}/. Please do one of these things"
+				kcbench_echo 2 1 " * download and extract the sources to one of the places mentioned"
+				kcbench_echo 2 1 " * download and extract the sources to a directory of your choice and provide it using --src"
+				kcbench_echo 2 1 " * allow auto-downloads"
+			fi
+			kcbench_echo 2 1 "Aborting ${KCB_prog_name}."
+			kcbench_exit 1
+		fi
+
+		# check for downloadtools, now we really need them
+		local errormsg
+		if type curl &> /dev/null ; then
+			local downloadtool="curl --silent --location"
+		elif type wget &> /dev/null ; then
+			local downloadtool="wget -O - --quiet"
+		else
+			errormsg="* Need either curl or wget for automatic download."
+		fi
+		for tool in gunzip tar unxz; do
+			if ! type "${tool}" &> /dev/null ; then
+				errormsg="${errormsg:+${errormsg}$'\n'}* Need ${tool} for automatic download"
+			fi
+		done
+		if [[ "${errormsg}" ]]; then
+			kcbench_echo 2 1 "Requirements not met:"
+			kcbench_echo 2 1 "${errormsg}"
+			kcbench_echo 2 1 "Aborting ${KCB_prog_name}."
+			kcbench_exit 1
+		fi
+		unset errormsg
+
+
+		# prepare download localtion
+		if ! mkdir -p "${default_sources_dir_home}"; then
+			kcbench_echo 2 1 "Could not create ${default_sources_dir_home}; aborting ${KCB_prog_name}."
+			kcbench_exit 1
+		fi
+
+		# remove partial downloads and prepare a dir for downloading
+		if [[ -e "${default_sources_dir_home}downloading" ]]; then
+			rm -rf "${default_sources_dir_home:?}downloading"
+		fi
+		if ! mkdir -p "${default_sources_dir_home}downloading" ; then
+			kcbench_echo 2 1 Could not create "${default_sources_dir_home}downloading"
+			kcbench_exit 1
+		fi
+
+		# download and extract
+		if [[ ! "${searchstring}" == "${searchstring%%-rc?}" ]]; then
+			# this is an rc kernel
+			local downloadurl="https://git.kernel.org/torvalds/t/linux-${searchstring}.tar.gz"
+			local uncompress_prog=gunzip
+		else
+			local downloadurl=https://cdn.kernel.org/pub/linux/kernel/v${searchstring%%\.*}.x/linux-"${searchstring}".tar.xz
+			local uncompress_prog=unxz
+		fi
+
+		kcbench_echo 1 2 "[NOTE] Downloading source of Linux ${searchstring}; this might take a while... "
+		if ! eval "${downloadtool}" "${downloadurl}" | eval "${uncompress_prog}" | tar -C "${default_sources_dir_home}downloading" -x ; then
+			kcbench_echo 2 1  "Downloading ${downloadurl} or extraction failed."
+			rm -rf "${default_sources_dir_home:?}downloading"
+			kcbench_exit 1
+		fi
+
+		mv "${default_sources_dir_home}downloading/"* "${default_sources_dir_home}"
+		rmdir "${default_sources_dir_home}downloading/"
+
+		KCB_linux_sources="${default_sources_dir_home%%/}"/linux-"${searchstring}"
+	fi
+}
+
+kcbench_init_real_check_srctree()
+{
+	# quckly check date in the source tree; prevents errors on testsystems where date is set incorectly
+	if (( $(date -r "${KCB_linux_sources}/Makefile" "+%s" 2> /dev/null) > $(date "+%s") )); then
+		kcbench_echo 2 1 "Makefile is younger then current date; please set your system time properly, otherwise compilation will fail. Aborting ${KCB_prog_name}."
+		kcbench_exit 1
+	fi
+}
+
+
+kcbench_init_real_prep_outputdir()
+{
+	local purposed_dir="${1}"
+
+	# create dir
+	if [[ "${purposed_dir}" ]]; then
+		# specified directory present?
+		if [[ ! -d "${purposed_dir}" ]]; then
+			kcbench_echo 2 1 "Could not find ${purposed_dir}."
+			kcbench_exit 1
+		fi
+
+		# we need the full path, not only a relative one
+		if [[ "${purposed_dir}" == "${purposed_dir##/}" ]]; then
+			purposed_dir="${PWD}/${purposed_dir}"
+		fi
+
+		# remove kcbench/ in purposed_dir if it exists from previous kcbench run
+		if [[ -d "${purposed_dir%%/}/${KCB_prog_name}" ]]; then
+			if ! rm -rf "${purposed_dir:?}/${KCB_prog_name:?}"; then
+				kcbench_echo 2 1 "Could not remove ${purposed_dir%%/}/${KCB_prog_name}"
+				kcbench_exit 1
+			fi
+		fi
+		readonly KCB_compile_output="${purposed_dir%%/}/${KCB_prog_name}/"
+		mkdir "${KCB_compile_output}"
+	else
+		# nothing provided, create a tmp dir
+		readonly KCB_compile_output="$(mktemp -d -t ${KCB_prog_name}.XXXXXXXXX)/"
+	fi
+	# was dir created?
+	local returncode=$?
+	if (( "${returncode}" > 0 )) || [[ ! -d "${KCB_compile_output}" ]]; then
+		kcbench_echo 2 1 "Could not create temporary output directory. Aborting ${KCB_prog_name}."
+		kcbench_exit 1
+	fi
+
+	# create a directory in KCB_compile_output where we can store a few things
+	KCB_logdir="${KCB_compile_output}/"
+	KCB_rate_results_fileprefix="${KCB_compile_output}rate-result-"
+}
+
+
+kcbench_init_real_check_outputdir()
+{
+	# let's check if there is enough free space at target
+	local freespace spaceneeded
+	freespace=$(( $(stat --file-system --format=%a "${KCB_compile_output}" ) * $(stat --file-system --format=%S "${KCB_compile_output}" )  / 1024))
+	if [[ "${force}" == "true" ]]; then
+		spaceneeded=1
+	elif [[ "${KCB_config_file}" ]]; then
+		# we don't know what's enabled, be pessimistic and assume it'll be
+		# something between 'defconfig' and 'allmodconfig' -- 2GiB, maybe?
+		spaceneeded=2097152
+	elif [[ "${KCB_target_config}" == "defconfig" ]]; then
+		# 512 MByte should be enough for this and not too much to ask for
+		spaceneeded=524288
+	elif [[ "${KCB_target_config}" == "allmodconfig" ]] && [[ "${force}" != "true" ]]; then
+		# an allmodconfig needs more space
+		if (( kernelverrelmaj >= 5 )); then
+			# 5.6 needed 5,6 GiB
+			spaceneeded=6291456
+		else
+			# 4.19 needed 4,3 GiB
+			spaceneeded=5242880
+		fi
+	fi
+
+	# now if this a rate run, then we'll need this space per worker
+	if [[ "${KCB_prog_name}" == "kcbenchrate" ]]; then
+		local additionalmsg=" (ideally $(( spaceneeded / 1024)) MiB per worker)"
+
+		# the more workers the more unlikely it will be that each of them needs
+		# all the space -- roughly estimate for this and improve later if this
+		# it's not good enough like that
+		if (( KCB_workers > 64 )); then
+			(( spaceneeded = spaceneeded * KCB_workers * 6 / 10 ))
+		elif (( KCB_workers > 32 )); then
+			(( spaceneeded = spaceneeded * KCB_workers * 6 / 10 ))
+		elif (( KCB_workers > 16 )); then
+			(( spaceneeded = spaceneeded * KCB_workers * 7 / 10 ))
+		elif (( KCB_workers > 8 )); then
+			(( spaceneeded = spaceneeded * KCB_workers * 8 / 10 ))
+		elif (( KCB_workers > 4 )); then
+			(( spaceneeded = spaceneeded * KCB_workers * 9 / 10 ))
+		else
+			(( spaceneeded = spaceneeded * KCB_workers ))
+		fi
+	fi
+
+
+	if (( spaceneeded > freespace )); then
+		kcbench_echo 2 1 -n "Need at least $(( spaceneeded / 1024)) MiB${additionalmsg} to compile a Linux kernel ${kernelverrelmaj}.${kernelverrelmin}. Please make "
+		kcbench_echo 2 1 -n "space at $(dirname "${KCB_compile_output}") or provide a different directory using"
+		kcbench_echo 2 1 "'--outputdir <dir>'. Aborting ${KCB_prog_name}. Use '--force' to override this check."
+		kcbench_exit 1
+	fi
+
+	unset freespace spaceneeded
+}
+
+
+kcbench_init_real_check_compiler()
+{
+	if [[ "${KCB_skip_compilerchecks}" ]]; then
+		return 0
+	fi
+
+	local ccheck_target_type="${1}"
+	local ccheck_compilervermaj="${2}"
+
+	# catch a few known problems
+	if [[ "${ccheck_target_type}" == "GCC" ]]; then
+		case "${ccheck_compilervermaj}" in
+		10)
+			# allmodconfig won't compile before 5.6
+			if [[ "${KCB_target_config}" == "allmodconfig" ]] && [[ "${force}" != "true" ]] ; then
+				if (( kernelverrelmaj < 5 )) ||
+				   ( (( kernelverrelmaj == 5 )) && (( kernelverrelmin < 6 )) );    then
+					kcbench_echo 2 1 "Compiling an allmodconfig configuration with gcc10 is known to fail prior"
+					kcbench_echo 2 1 "to Linux kernel 5.6. Aborting ${KCB_prog_name}. Use '--force' to override this check."
+					kcbench_exit 1
+				fi
+			fi
+			;;
+		esac
+
+		# disable fcf-protection on kernels prior to 5.3, as build will fail otherwise
+		# see https://git.kernel.org/linus/29be86d7f9
+		if (( kernelverrelmaj < 5 )) ||
+		   ( (( kernelverrelmaj == 5 )) && (( kernelverrelmin < 3 )) );    then
+			if gcc -Q --help=common -c --target-help | grep -- '-fcf-protection=' &> /dev/null ; then
+				local extraflags="CFLAGS_KERNEL='-fcf-protection=none' CFLAGS_MODULE='-fcf-protection=none'"
+				KCB_additional_make_flags="${KCB_additional_make_flags:+"${KCB_additional_make_flags}" }${extraflags}"
+				kcbench_echo 1 2 "[NOTE] Will call 'make' with \"${extraflags}\", as compiling Linux < 5.3 might fail otherwise with your compiler (see https://git.kernel.org/linus/29be86d7f9)."
+			fi
+		fi
+
+		if (( kernelverrelmaj == 5 )) && (( kernelverrelmin < 11 ));   then
+		        # ugly, but does the trick at least on Fedora and Ubuntu
+			if grep -Pzo 'if \(\!symtab\) \{\n.*WARN\("missing symbol table"\);' "${KCB_linux_sources}"/tools/objtool/elf.c &> /dev/null &&
+			   ( (( $(ld --version | grep 'GNU ld' | sed 's!-.*!!' | tr -d -c 0-9 2>/dev/null) > 236 )) &> /dev/null || false ) ; then
+				kcbench_echo 1 2 \
+"Aborting, seems you are trying to compile Linux 5.10 or earlier with binutils
+2.37 or later, which is known to fail. Compile either Linux 5.11 (or later) or
+apply https://git.kernel.org/linus/1d489151e9f9.
+
+Call kcbench with '--skip-compilerchecks' to bypass this check."
+				kcbench_exit 1
+			fi
+		fi
+
+	elif [[ "${ccheck_target_type}" == "CLANG" ]]; then
+		case "${ccheck_compilervermaj}" in
+		8|7|6)
+			kcbench_echo 2 1 "Need at least Clang 9.0 to compile a Linux kernel. Aborting ${KCB_prog_name}."
+			kcbench_exit 1
+			;;
+		esac
+
+		if [[ "${LLVM}" == 1 ]] ; then
+			if (( kernelverrelmaj < 6 )) && (( kernelverrelmin < 7 )) ; then
+				kcbench_echo 2 1 "Only 5.7 and upwards support compiling using LLVM=1."
+				kcbench_echo 2 1 "Aborting ${KCB_prog_name}. Use '--force' to override this check."
+				kcbench_echo 2 1 "Note: on x86_64 Linux 5.1 to 5.6 can be compiled with"
+				kcbench_echo 2 1 "clang if you call kcbench with '--cc clang --host clang'."
+				kcbench_exit 1
+			fi
+		fi
+		if (( kernelverrelmaj < 5 )) ||
+		   ( (( kernelverrelmaj == 5 )) && (( kernelverrelmin < 1 )) ); then
+			kcbench_echo 2 1 "Compiling Linux with clang known to fail prior to Linux 5.1."
+			kcbench_echo 2 1 "Aborting ${KCB_prog_name}. Use '--force' to override this check."
+			kcbench_exit 1
+		fi
+	fi
+}
+
+
+
+# check everthing before starting
+kcbench_init_real()
+{
+	# print this here, as verboselevel is not known earlier
+	kcbench_echo 1 5 "kcbench_init_basic set KCB_default_jobs to: ${KCB_default_jobs}"
+
+
+	# avoid all interference from CCACHE
+	export CCACHE_DISABLE=1
+
+	# check and store additional make args the users requested
+	if [[ "${KCBUSR_add_make_args}" ]]; then
+		if [[ "${KCBUSR_add_make_args}" != "${KCBUSR_add_make_args##*HOSTCC=}" ]]; then
+			kcbench_echo 2 1 "Specifying HOSTCC= via '--add-make-args' is not allowed, use '--hostcc' for this. Aborting."
+			kcbench_exit 1
+		fi
+		if [[ "${KCBUSR_add_make_args}" != "${KCBUSR_add_make_args##*CC=}" ]]; then
+			kcbench_echo 2 1 "Specifying CC= via '--add-make-args' is not allowed, use '--cc' for this. Aborting."
+			kcbench_exit 1
+		fi
+
+		KCB_additional_make_flags="${KCBUSR_add_make_args}"
+		unset KCBUSR_add_make_args
+	fi
+
+	# ensure a user provided config file does exist and update the config target
+	if [[ "${KCB_config_file}" ]]; then
+		if [[ ! -r "${KCB_config_file}" ]]; then
+			kcbench_echo 2 1 "Unable to read config file '${KCB_config_file}'"
+			kcbench_exit 1
+		fi
+		# warn if the user also wanted to do an allmodconfig build
+		if [[ "${KCB_target_config}" != "defconfig" ]]; then
+			kcbench_echo 2 1 "Warning: kconfig file overrides '${KCB_target_config}' build target to 'olddefconfig'."
+		fi
+
+		KCB_target_config="olddefconfig"
+	fi
+
+	# define make target for building; note: we use "vmlinux" and not "bzImage" or
+	# "all", as bzImage uses just one CPU for a few seconds when compressing
+	KCB_target_build="vmlinux"
+	if [[ "${KCB_target_config}" == "defconfig" ]]; then
+		: # nothing
+	elif [[ "${KCB_target_config}" == "allmodconfig" ]]; then
+		KCB_target_build="${KCB_target_build} modules"
+	elif [[ "${KCB_config_file}" ]]; then
+		if grep -q '^CONFIG_MODULES=y$' "${KCB_config_file}"; then
+			KCB_target_build="${KCB_target_build} modules"
+		fi
+	else
+		kcbench_echo 2 1 "Unable to detect the build target."
+		kcbench_exit 1
+	fi
+
+	# set a compiler to use for cases where the script calls it; needed,
+	# among others, when querying the version for the info output; not
+	# passed as CC or HOSTCC to normally let the kernel do it's magic
+	if [[ "${LLVM}" == 1 ]]; then
+		# user specified --llmv, so it's clang
+		KCB_default_compiler=clang
+	else
+		# kernel default as of this writing (5.7-rc2)
+		KCB_default_compiler=gcc
+	fi
+
+
+	# check for cross-compilation
+	if [[ "${KCBUSR_cross_compile}" ]]; then
+		kcbench_echo 1 2 $'\n'"WARNING: Cross-compiling still experimental. Use at your own risk!"$'\n'
+
+		# prevent confusing things
+		if [[ "${ARCH}" ]]; then
+			kcbench_echo 2 1 "ARCH variable already set. Unset it or call ${KCB_prog_name} without --cross-compile. Aborting."
+			kcbench_exit 1
+		elif [[ "${CROSS_COMPILE}" ]]; then
+			kcbench_echo 2 1 "CROSS_COMPILE variable already set. Unset it or call ${KCB_prog_name} without --cross-compile. Aborting."
+			kcbench_exit 1
+		fi
+
+		# set kernel arch appropriately
+		case "${KCBUSR_cross_compile}" in
+		  arm|arm64|powerpc|riscv|x86_64)
+			export ARCH="${KCBUSR_cross_compile}" ;;
+		  aarch64)
+			export ARCH="arm64" ;;
+		  riscv64)
+			export ARCH="riscv" ;;
+		  powerpc64)
+			export ARCH="powerpc" ;;
+		  *)
+			kcbench_echo 2 1 "Compiling for ${KCBUSR_cross_compile} is not supported by ${KCB_prog_name}. Try setting ARCH= and CROSS_COMPILE= just like you would when building a Linux kernel directly. Aborting."
+			kcbench_exit 1
+			;;
+		esac
+
+		# in some cases the compiler arch will differ from ARCH
+		local compiler_arch
+		case "${KCBUSR_cross_compile}" in
+		  arm64)
+			compiler_arch="aarch64" ;;
+		  riscv)
+			compiler_arch="riscv64" ;;
+		  *)
+			compiler_arch="${KCBUSR_cross_compile}"
+		esac
+
+		# There are two hard things in computer science: cache invalidation, naming things, and off-by-one errors.
+		case "${KCBUSR_crosscomp_scheme}" in
+		  debian|fedora|redhat|ubuntu)
+			case "${KCBUSR_crosscomp_scheme}" in
+			  debian|ubuntu)
+				[[ "${compiler_arch}" == "arm" ]] &&
+					export CROSS_COMPILE="${compiler_arch}-linux-gnueabihf-"
+				;;
+			esac
+
+			# if not set up to this point, go with the default
+			if [[ ! "${CROSS_COMPILE}" ]]; then
+				export CROSS_COMPILE="${compiler_arch}-linux-gnu-"
+			fi
+			;;
+		  generic)
+			# we need to try to find the cross compiler our own
+			local crosscomp_exec
+			for crosscomp_exec in ${compiler_arch}-{unknown-,}{linux,elf}{-gnu,-musl,-elf,""}{eabi,eabihf,}; do
+				if type -p "${crosscomp_exec}-${KCB_default_compiler}" &> /dev/null; then
+					if [[ ! "${CROSS_COMPILE}" ]]; then
+						export CROSS_COMPILE="${crosscomp_exec}-"
+					else
+						kcbench_echo 2 1 "We found more than one cross compiler that might match (${CROSS_COMPILE}${KCB_default_compiler} and ${crosscomp_exec}-${KCB_default_compiler}); please specify which one to use by setting CROSS_COMPILE directly or setting '--crosscomp-scheme'. Aborting ${KCB_prog_name}."
+						kcbench_exit 1
+					fi
+				fi
+			done
+
+			if [[ ! "${CROSS_COMPILE}" ]]; then
+				kcbench_echo 2 1 "We could not find a cross compiler. These were tried:"
+				for crosscomp_exec in ${compiler_arch}-{unknown-,}{linux,elf}{-gnu,-musl,-elf,""}{eabi,eabihf,}; do
+					kcbench_echo 2 1 " ${crosscomp_exec}-${KCB_default_compiler}"
+				done
+				kcbench_echo 2 1 "Aborting ${KCB_prog_name}."
+				kcbench_exit 1
+			fi
+			unset crosscomp_exec
+			;;
+		  *)
+			kcbench_echo 2 1 "Cross compiler naming scheme ${KCBUSR_crosscomp_scheme} not supported by ${KCB_prog_name}. Aborting"
+			kcbench_exit 1
+			;;
+		esac
+
+		unset compiler_arch
+	fi
+
+	# we also need to know the compiler type for some of the checks this
+	# script performs; BTW: it's not a problem if this fails to detect
+	# what we're using, in that case there will be a warning later
+	local KCBUSR_compiler_target_type
+	if [[ "${KCBUSR_compiler_target}" != "${KCBUSR_compiler_target%*clang*}" ]] || [[ "${LLVM}" == 1 ]]; then
+		# looks like we'll use clang
+		KCBUSR_compiler_target_type=CLANG
+	elif [[ ! "${KCBUSR_compiler_target}" ]] || [[ "${KCBUSR_compiler_target}" != "${KCBUSR_compiler_target%*gcc*}" ]]; then
+		# this looks like GCC
+		KCBUSR_compiler_target_type=GCC
+	fi
+
+	# need to check if the compiler is present
+	local compilertools
+	if [[ "${KCBUSR_compiler_target}" ]]; then
+		compilertools="${compilertools} ${KCBUSR_compiler_target}"
+	elif [[ "${KCBUSR_compiler_target_type}" == "GCC" ]]; then
+		compilertools="${compilertools} ${CROSS_COMPILE}gcc"
+	elif [[ "${KCBUSR_compiler_target_type}" == "CLANG" ]]; then
+		compilertools="${compilertools} ${CROSS_COMPILE}clang"
+	fi
+
+	# need to check if binutils for the target compiler are present, too
+	# clang will use the normal binutils uless LLVM=1 is set
+	if (( LLVM == 1 )); then
+		# some dists package all of these seperately
+		local binutilstool
+		for binutilstool in ld.lld llvm-ar llvm-as llvm-nm llvm-objcopy llvm-objdump llvm-readelf llvm-size llvm-strip; do
+			compilertools="${compilertools} ${CROSS_COMPILE}${binutilstool}"
+		done
+		unset binutilstool
+	else
+		# the tools "ar as ld nm objcopy objdump readelf size strip" are needed, but
+		# normally packaged together as binutils, so only check for as and ld
+		compilertools="${compilertools} ${CROSS_COMPILE}as ${CROSS_COMPILE}ld"
+	fi
+
+	# and we need the host compiler, too
+	if [[ "${KCBUSR_compiler_host}" ]]; then
+		compilertools="${compilertools} ${KCBUSR_compiler_host}"
+	elif [[ "${CROSS_COMPILE}" ]]; then
+		if [[ "${KCBUSR_compiler_target_type}" == "GCC" ]]; then
+			compilertools="${compilertools} gcc"
+		elif [[ "${KCBUSR_compiler_target_type}" == "CLANG" ]]; then
+			compilertools="${compilertools} clang"
+		fi
+	fi
+
+
+	# now we can check if we have all the tools and include file we need
+	kcbench_init_real_checktools "${compilertools}"
+	unset compilertools # not needed anymore
+	unset KCBUSR_cross_compile # not needed anymore
+	unset KCBUSR_crosscomp_scheme # not needed anymore
+
+
+	# we can now assume the compiler is around to query its major version
+	# which is needed in some checks
+	local KCBUSR_compiler_target_vermaj
+	KCBUSR_compiler_target_vermaj="$(${KCBUSR_compiler_target:-${CROSS_COMPILE}${KCB_default_compiler}} -dumpversion 2>/dev/null || : )"
+	# gcc sometimes prinmts something like "9", but sometimes "9.3.0" :-/
+	# clang prints something like "10.0.0"
+	KCBUSR_compiler_target_vermaj="${KCBUSR_compiler_target_vermaj%%\.*}"
+
+	# start preparing what we'll later pass to make
+	[[ "${KCBUSR_compiler_target}" ]] && KCB_additional_make_flags="${KCB_additional_make_flags:+"${KCB_additional_make_flags}" }CC='${KCBUSR_compiler_target}'"
+	[[ "${KCBUSR_compiler_host}" ]] && KCB_additional_make_flags="${KCB_additional_make_flags:+"${KCB_additional_make_flags}" }HOSTCC='${KCBUSR_compiler_host}'"
+
+
+
+	# decide ourselves what to compile if we have to
+	local KCBTMP_linux_compiled
+	if [[ ! "${KCBUSR_compile_this}" ]] ; then
+		kcbench_init_real_decideversion "${KCBUSR_compiler_target_type}" "${KCBUSR_compiler_target_vermaj}"
+		kcbench_echo 1 5 "kcbench_init_real_decideversion set KCBTMP_linux_compiled to: ${KCBTMP_linux_compiled}"
+	fi
+
+
+	# find the source or download it if needed
+	kcbench_init_real_findsrctree "${KCBUSR_compile_this}" "${KCBTMP_linux_compiled}"
+	kcbench_echo 1 5 "kcbench_init_real_findsrctree set KCB_linux_sources to: ${KCB_linux_sources}"
+	unset KCB_default_linux_compiled # not needed anymore
+	unset KCBUSR_compile_this # was provided by user, but not needed anymore
+	unset KCBTMP_linux_compiled # not needed anymore
+
+
+	# catch a few known problems
+	kcbench_init_real_check_srctree
+
+
+	# prepare directory used for O=
+	trap 'kcbench_exit 127' 1 2 15
+	kcbench_init_real_prep_outputdir "${KCBUSR_compile_directory}"
+	kcbench_echo 1 5 "kcbench_init_real_prep_outputdir set KCB_compile_output to: ${KCB_compile_output}"
+	unset KCBUSR_compile_directory
+
+
+	# now that we have a directory to put stuff into lets determine Linux kernel version,
+	# which is printed later and needed during a few checks
+	KCB_linux_version="$(make -s -C "${KCB_linux_sources}" O="${KCB_compile_output}" kernelversion 2>/dev/null || :)"
+	local kernelverrelmaj
+	local kernelverrelmin
+	kernelverrelmaj="${KCB_linux_version%%.*}"
+	kernelverrelmin=${KCB_linux_version##${kernelverrelmaj}\.}
+	kernelverrelmin="${kernelverrelmin%%.*}"
+
+
+	# catch a few known compiler problems
+	kcbench_init_real_check_compiler "${KCBUSR_compiler_target_type}" "${KCBUSR_compiler_target_vermaj}"
+
+
+	# how many jobs to use?
+	if [[ "${KCB_prog_name}" == "kcbenchrate" ]]; then
+		if [[ "${KCBUSR_jobs}" ]]; then
+			if ! (( KCBUSR_jobs > 0 )) &> /dev/null ; then
+				kcbench_echo 2 1 "Please provide a real number together with '-j/--jobs' and only specify it once when using '--rate' or '-w/-workers'. Aborting. "
+				kcbench_exit 1
+			fi
+			KCB_jobs="$(( KCBUSR_jobs ))"
+		elif [[ "${KCB_prog_name}" == "kcbenchrate" ]]; then
+			# use default
+			KCB_jobs="1"
+		fi
+	else
+		if [[ "${KCBUSR_jobs}" ]]; then
+			# user provided number of jobs; check user input
+			for number in ${KCBUSR_jobs}; do
+				# is KCBUSR_jobs a real number?
+				if (( ! number > 0 )) ; then
+					kcbench_echo 2 1 "Please provide a real number together with --jobs. Aborting."
+					kcbench_exit 1
+				fi
+			done
+			KCB_jobs="${KCBUSR_jobs}"
+		else
+			# use default
+			KCB_jobs="${KCB_default_jobs}"
+		fi
+	fi
+	unset KCBUSR_jobs
+	unset KCB_default_jobs
+
+
+	# and how many workers
+	if [[ "${KCB_prog_name}" == "kcbenchrate" ]]; then
+		if [[ "${KCBUSR_workers}" ]];  then
+			if ! (( KCBUSR_workers > 0 )); then
+				kcbench_echo 2 1 "Please provide a real number together with '-w/--workers'. Aborting. "
+				kcbench_exit 1
+			fi
+			KCB_workers="$(( KCBUSR_workers ))"
+		else
+			KCB_workers="${KCB_default_workers}"
+		fi
+	fi
+	unset KCBUSR_workers
+	unset KCB_default_workers
+
+
+	# enough space at O= directory free?
+	kcbench_init_real_check_outputdir
+
+
+	# one more iterations than the default for a rate run
+	if [[ "${KCB_prog_name}" == "kcbenchrate" ]]; then
+		(( KCB_iterations += 1 ))
+	fi
+	# another user input that needs to be checked: is number_of_iterations a real number?
+	if [[ ! "${KCB_infinite}" ]] && [[ "${KCBUSR_iterations}" ]]; then
+		if (( KCBUSR_iterations >= 1 )) ; then
+			KCB_iterations="${KCBUSR_iterations}"
+		else
+			kcbench_echo 2 1 "Please provide a real number together with --iterations. Aborting ${KCB_prog_name}."
+			kcbench_exit 1
+		fi
+	fi
+	unset KCBUSR_iterations # not needed anymore
+
+
+	# the script might print a few environment variables that might be releavant
+	local check_variable
+	for check_variable in ARCH CCACHE_DISABLE CROSS_COMPILE CROSS_COMPILE_COMPAT LLVM CC HOSTCC; do
+		if [[ "${!check_variable}" ]]; then
+			KCB_environment="${KCB_environment:+"${KCB_environment}" }${check_variable}=\"${!check_variable}\""
+			kcbench_echo 1 4 "Environment: ${check_variable}=\'${!check_variable}\'"
+		fi
+	done
+
+
+	# save logfiles somewhere?
+	if [[ "${KCBUSR_save_failed_compilerun_logs}" ]] && [[ ! -d "${KCBUSR_save_failed_compilerun_logs}" ]] ; then
+		kcbench_echo 2 1 "Could not find ${KCBUSR_save_failed_compilerun_logs} (provided via --savefailedlogs)."
+		kcbench_exit 1
+	fi
+}
+
+
+# basic information about the system
+kcbench_common_sysinfo()
+{
+	# prep a few things before output, otherwise printing section gets to messy
+	local cpu_name
+	cpu_name="$(LC_ALL=C lscpu | grep -m 1 'Model name:' | sed -e 's/^Model name:\s*//g')"
+
+	local compiler_target_fullversion
+	compiler_target_fullversion=$(${KCBUSR_compiler_target:-${CROSS_COMPILE}${KCB_default_compiler}} --version | head -n 1)
+
+	local compiler_host_fullversion
+	if { [[ "${KCBUSR_compiler_host}" ]] && [[ "${KCBUSR_compiler_host}" != "${KCBUSR_compiler_target}" ]] ; } ||
+	   [[ "${CROSS_COMPILE}" ]] ; then
+		compiler_host_fullversion="$(${KCBUSR_compiler_host:-${KCB_default_compiler}} --version | head -n 1)"
+	fi
+
+	local cpufreqinfo
+	if [[ -e /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor ]]; then
+		cpufreqinfo="$(sort -u /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor)"
+		cpufreqinfo="${cpufreqinfo} [$(sort -u /sys/devices/system/cpu/cpu*/cpufreq/scaling_driver)]"
+	else
+		cpufreqinfo="Unknown"
+	fi
+
+	local memorytotal
+	memorytotal="$(grep MemTotal: /proc/meminfo)"
+	memorytotal="${memorytotal%%" kB"}"
+	memorytotal="${memorytotal##"MemTotal:"}"
+	memorytotal="$(( memorytotal / 1024 )) MiB"
+
+
+	# print
+	kcbench_echo 1 "${1}" "Processor:           ${cpu_name} [${KCB_nprocall} CPUs]"
+	kcbench_echo 1 "${1}" "Cpufreq; Memory:     ${cpufreqinfo}; ${memorytotal}"
+	kcbench_echo 1 "${1}" "Linux running:       $(uname -r) [$(uname -m)]"
+	if [[ "${compiler_host_fullversion}" ]]; then
+		kcbench_echo 1 "${1}" "Compiler (target):   ${compiler_target_fullversion}"
+		kcbench_echo 1 "${1}" "Compiler (host):     ${compiler_host_fullversion}"
+	else
+		kcbench_echo 1 "${1}" "Compiler:            ${compiler_target_fullversion}"
+	fi
+	kcbench_echo 1 "${1}" "Linux compiled:      ${KCB_linux_version} [${KCB_linux_sources}]"
+	kcbench_echo 1 "${1}" "Config; Environment: ${KCB_config_file+${KCB_config_file} }${KCB_target_config}; ${KCB_environment:+${KCB_environment}}"
+	kcbench_echo 1 "${1}" "Build command:       make ${KCB_additional_make_flags:+"${KCB_additional_make_flags}" }${KCB_target_build}"
+	return 0
+}
+
+kcbench_common_create_config()
+{
+	local outputdirectory="${1:?}"
+
+
+	local tmpoutputdirectory="${outputdirectory}kcbench.tmp/"
+	local logfile="${tmpoutputdirectory}makeconfig"
+
+
+	# create the outputdirectory
+	if ! mkdir "${outputdirectory}" 2>/dev/null ; then
+		kcbench_echo 1 2 "ERROR: could not create ${outputdirectory}. Aborting."
+		kcbench_exit 2
+	fi
+
+
+	# create a temporary outputdirectory for make call
+	if ! mkdir "${tmpoutputdirectory}" &> /dev/null; then
+		kcbench_echo 2 1 "Could not create ${tmpoutputdirectory}. Aborting."
+		kcbench_exit 2
+	fi
+
+
+	# create configuration
+	if [[ "${KCB_config_file}" ]]; then
+		kcbench_echo 1 3 "Copying config file '${KCB_config_file}'."
+		cat "${KCB_config_file}" > "${tmpoutputdirectory}/.config"
+	fi
+	local runcmd="make --silent ${KCB_additional_make_flags:+"${KCB_additional_make_flags}" }-C '${KCB_linux_sources}' O='${tmpoutputdirectory}' -j '${KCB_nprocall}' ${KCB_target_config}"
+	kcbench_echo 1 3 "Running '${runcmd}'."
+	if ! eval "${runcmd}" >> "${logfile}" 2>&1 ; then
+		kcbench_echo 2 1 "Aborting ${KCB_prog_name}, as config generation failed. Command used:"
+		kcbench_echo 2 1 "${KCB_environment:+"${KCB_environment}" }${runcmd}"
+		kcbench_echo 2 1 "Tail from the output:"
+		kcbench_echo 2 1 "$(tail -n $(( 15 + KCB_nprocall )) "${logfile}")"
+
+		[[ "${KCB_inspect}" == "config" ]] && kcbench_speed_inspect_outputdir "${tmpoutputdirectory}"
+		kcbench_exit 2
+	fi
+
+
+	# disable WERROR, just complicates things without a good reason
+	"${KCB_linux_sources}"/scripts/config --file "${tmpoutputdirectory}"/.config -d WERROR
+
+
+	# finish up, moves .config over
+	[[ "${KCB_inspect}" == "config" ]] && kcbench_speed_inspect_outputdir "${tmpoutputdirectory}"
+	mv "${tmpoutputdirectory}".config "${outputdirectory}"
+	(( KCB_verbose_level >= 5 )) && kcbench_echo 1 5 "Generated .config: $(grep "Kernel Configuration" "${outputdirectory}.config")"
+	rm -rf "${tmpoutputdirectory:?}"
+}
+
+
+kcbench_common_build_kernel()
+{
+	local this_jobs="${1:?}"
+	local this_outputdir="${2:?}"
+	local this_build_timefile="${3:?}"
+	local this_make_logfile="${4:?}"
+
+	# prepare the command we'll run
+	if [[ ! "${KCB_simulate}" ]]; then
+		local runcmd="make --silent ${KCB_additional_make_flags:+"${KCB_additional_make_flags}" }-C '${KCB_linux_sources}' O='${this_outputdir}' -j '${this_jobs}' ${KCB_target_build}"
+	else
+		# no need to pass 'this_worker' around for this simulation, but use it, if it's there
+		local runcmd="sleep $(( ${this_worker:-2} +1 ))"
+	fi
+
+	if [[ "${this_make_logfile}" == "RETURN_CMD" ]]; then
+		# hack a special case: just print the cmd we would have started
+		echo "${runcmd}"
+		return 0
+	fi
+
+	echo "${KCB_environment:+"${KCB_environment}" }${runcmd}" > "${this_make_logfile}"
+
+	# engage and let the function that called us deal with the returncode
+	eval "/usr/bin/time --output '${this_build_timefile}' -f 'e %e\nE %E\nS %S\nU %U\nP %P\nM %M\nF %F\nR %R\nW %W\nc %c\nw %w\nI %I\nO %O\nx %x' ${runcmd}" >> "${this_make_logfile}" 2>&1
+}
+
+
+kcbench_speed_parse_results ()
+{
+	local this_resultfile="${1}"
+	local this_verbose_level="${2}"
+	local this_runtype="${3}"
+
+	while read -r format value; do
+		case "${format}" in
+			E)
+				local tm_elapsed="${value}"
+				;;
+			e)
+				local tm_elapsed_s="${value}"
+				;;
+			S)
+				local tm_kernel_s="${value}"
+				;;
+			U)
+				local tm_user_s="${value}"
+				;;
+			P)
+				local tm_cpu_p="${value}"
+				;;
+			M)
+				local tm_mem_max="${value}"
+				;;
+			F)
+				local tm_pgfault_maj="${value}"
+				;;
+			R)
+				local tm_pgfault_min="${value}"
+				;;
+			W)
+				local tm_swapped="${value}"
+				;;
+			c)
+				local tm_cswitched="${value}"
+				;;
+			w)
+				local tm_waits="${value}"
+				;;
+			I)
+				local tm_file_in="${value}"
+				;;
+			O)
+				local tm_file_out="${value}"
+				;;
+			x)
+				local tm_exit="${value}"
+				;;
+		esac
+	done < "${this_resultfile}"
+
+	if [[ "${this_runtype}" != "run-0-fillcaches" ]]; then
+		local rate
+		rate="$(echo "rate=( 3600 / ${tm_elapsed_s}) + 0.005 ; scale=2; rate/1" | bc -l)"
+		if (( tm_pgfault_maj > 20 )); then
+			local tmpstring=", ${tm_pgfault_maj} maj. pagefaults"
+		fi
+
+
+		kcbench_echo 1 "${this_verbose_level}" "${tm_elapsed_s} seconds / ${rate} kernels/hour [P:${tm_cpu_p}${tmpstring}]"
+		if [[ "${print_detailed_results}" ]]; then
+			echo "  Elapsed Time(E): ${tm_elapsed} (${tm_elapsed_s} seconds)"
+			echo "  CPU usage (P): ${tm_cpu_p}"
+			echo "  Kernel time (S): ${tm_kernel_s} seconds"
+			echo "  User time (U): ${tm_user_s} seconds"
+			echo "  Major page faults (F): ${tm_pgfault_maj}"
+			echo "  Minor page faults (R): ${tm_pgfault_min}"
+			echo "  Context switches involuntarily (c): ${tm_cswitched}"
+			echo "  Context switches voluntarily (w): ${tm_waits}"
+		fi
+	else
+		if [[ "${show_result_from_cache_free_run}" ]]; then
+			kcbench_echo 1 2 "Done (-j ${KCB_nprocall}, e: ${tm_elapsed_s})"
+		else
+			kcbench_echo 1 2 "Done"
+		fi
+	fi
+}
+
+
+
+kcbench_speed_inspect_outputdir()
+{
+	cd "${1}"
+	echo
+	echo "Starting a shell to inspect outputdir. Hit with CTRL+D or exit to continue ${KCB_prog_name}."
+	PS1='[kcbench inspection shell:\W]\$ ' bash --noprofile --norc || :
+	cd - &> /dev/null
+}
+
+
+kcbench_speed_compile_kernel()
+{
+	local this_verbose_level="${1}"
+	local this_nrjobs="${2}"
+	local this_runtype="${3}"
+	local this_logfile="${KCB_logdir%%/}/${3}"
+	local this_msgstart="${4}"
+
+	local this_worker=0
+	local this_outputdir="${KCB_compile_output}worker-${this_worker}/"
+
+	# prep a fresh output directory using the template created earlier
+	if ! cp -r "${KCB_compile_output}worker.template/" "${this_outputdir}" ; then
+		kcbench_echo 1 2 "Error: Could not copy '${${KCB_compile_output}worker.template/}' to '${this_outputdir}'. Aborting"
+		kcbench_exit 2
+	fi
+
+
+	kcbench_echo 1 3 "Running '$(kcbench_common_build_kernel "${this_nrjobs}" "${this_outputdir}" "${this_logfile}.time" "RETURN_CMD")'."
+	kcbench_echo 1 "${this_verbose_level}" -n "${this_msgstart}"
+
+	if kcbench_common_build_kernel "${this_nrjobs}" "${this_outputdir}" "${this_logfile}.time" "${this_logfile}"; then
+		kcbench_speed_parse_results "${this_logfile}.time" "${this_verbose_level}" "${this_runtype}"
+
+		kcbench_echo 1 4 "Disk usage: $(du -sh "${this_outputdir}")"
+		if [[ "${KCB_inspect}" == "build" ]]; then
+			kcbench_speed_inspect_outputdir "${this_outputdir}"
+		fi
+
+		# remove the outputdir, we do not need it anymore
+		rm -rf "${this_outputdir:?}"
+	else
+		kcbench_echo 1 4 "Disk usage: $(du -sh "${this_outputdir}")"
+		if [[ "${KCB_inspect}" == "build" ]]; then
+			kcbench_speed_inspect_outputdir "${this_outputdir}"
+		fi
+
+		# remove the outputdir, we do not need it anymore
+		rm -rf "${this_outputdir:?}"
+
+		# notifiy the user and start with a newline
+		[[ ! "${KCB_infinite}" == "true" ]] && kcbench_echo 1 1 ""
+
+		kcbench_echo 2 1 -n "Compilation failed"
+		if [[ "${KCB_infinite}" == "true" ]]; then
+			# add date
+			kcbench_echo 2 1 -n " ($(date))."
+		else
+			kcbench_echo 2 1 -n "."
+		fi
+
+		# save output from make, if requested
+		if [[ "${KCBUSR_save_failed_compilerun_logs}" ]]; then
+			kcbench_echo 2 1 -n " Saving output from make to ${KCBUSR_save_failed_compilerun_logs}/${KCB_prog_name}-$(basename "${this_logfile}")."
+			cp "${this_logfile}" "${KCBUSR_save_failed_compilerun_logs}/${KCB_prog_name}-$(basename "${this_logfile}")"
+		fi
+
+		# either move on or print some more details and exit
+		if [[ "${KCB_infinite}" == "true" ]] ; then
+			# need a newline in this case
+			kcbench_echo 2 1 ""
+			return 1
+		else
+			kcbench_echo 2 1 " Aborting ${KCB_prog_name}. Command used for compilation:"
+			kcbench_echo 2 1 "$(head -n 1 "${this_logfile}")"
+			kcbench_echo 2 1 "Tail from the output:"
+			kcbench_echo 2 1 "$(tail -n $(( 15 + "${this_nrjobs}" )) "${this_logfile}")"
+			kcbench_exit 2
+		fi
+	fi
+}
+
+
+kcbench_speed_main ()
+{
+	# print some information
+	kcbench_common_sysinfo 2
+
+
+	# create config
+	kcbench_common_create_config "${KCB_compile_output}worker.template/"
+
+
+	# prepration run
+	if [[ "${KCB_cachefillrun}" ]]; then
+		# Note: I tried to use something like this first:
+		# find "${KCB_linux_sources}" -type f | grep -e '.h$'  -e '.c$' -e 'Makefile' -e 'Kconfig' -e 'Kbuild' -e '.S$' | xargs cat > /dev/null
+		# But it does not work as good as a thrown-away compile-run
+
+		# only print result if a hidden vairable was set
+		if [[ "${show_result_from_cache_free_run}" ]]; then
+			kcbench_speed_compile_kernel 2 "${KCB_nprocall}" run-0-fillcaches "Filling caches:      "
+		else
+			kcbench_echo 1 2 -n "Filling caches:      This might take a while... "
+			kcbench_speed_compile_kernel 3 "${KCB_nprocall}" run-0-fillcaches "Fill cache run (-j ${KCB_nprocall})"
+		fi
+	fi
+
+	# go
+	local totalruns=1
+	local errorruns=0
+	while : ; do
+		for number in ${KCB_jobs}; do
+			for ((run=1; run <= KCB_iterations ; run++)) ; do
+				if ! kcbench_speed_compile_kernel 1 "${number}" "run${totalruns}" "$(printf "%-21s" "Run ${totalruns} (-j ${number}):")"; then
+					(( errorruns += 1 ))
+				fi
+				(( totalruns++ ))
+			done
+		done
+
+		if [[ ! "${KCB_infinite}" ]]; then
+			# get out of the while loop
+			break
+		fi
+
+		if (( errorruns > 0 )) ; then
+			kcbench_echo 1 1 "Total # of errors:  ${errorruns}"
+		fi
+	done
+}
+
+
+kcbench_rate_worker()
+{
+	local this_worker="${1}"
+	local this_ignorelockfile="${2}"
+	local this_resultfile="${3}"
+
+
+	local this_templatedir="${KCB_compile_output}worker.template/"
+	local this_outputdir="${KCB_compile_output}worker-${this_worker}/"
+	local this_build_timefile="${this_outputdir}kcbench_time.log"
+	local this_make_logfile="${this_outputdir}kcbench_make.log"
+
+
+	# reset trap to default, main thread will handle everything
+	trap - 1 2 15
+
+	# go
+	local this_counter=0
+	local this_errorcount=0
+
+
+	# pre resultfile, main thread will check for it
+	touch "${this_resultfile}"
+
+	while : ; do
+		(( this_counter += 1 )) || : # needed here, otherweise it might fail in the error & continue case down below
+
+		# discard the result from this run if it was started before all other workers were running, too
+		# that will be handled by a check for 'this_counter == 0' later in this function
+		if [[ -e "${this_ignorelockfile}" ]]; then
+			this_counter=0
+		fi
+
+
+		# prep a fresh output directory using the template created earlier
+		if ! cp -r "${this_templatedir}" "${this_outputdir}" ; then
+			kcbench_echo 1 2 "(WRK[${this_worker}]) Error: Could not copy '${this_templatedir}' to '${this_outputdir}'. Aborting"
+			kcbench_exit 2
+		fi
+
+
+		# build
+		if ! kcbench_common_build_kernel "${KCB_jobs}" "${this_outputdir}" "${this_build_timefile}" "${this_make_logfile}"; then
+			(( this_errorcount += 1 ))
+			if [[ "${KCBUSR_save_failed_compilerun_logs}" ]]; then
+				cp "${this_make_logfile}" "${KCBUSR_save_failed_compilerun_logs}${KCB_prog_name}-worker${this_worker}-error${this_errorcount}"
+			fi
+
+			# either move on or print some more details and exit
+			if [[ "${KCB_infinite}" == "true" ]] ; then
+				echo "KCBERROR (WRK[${this_worker}]) Compilation failed)" >> "${this_resultfile}"
+				(( this_counter -= 1 )) # makes sure a result are counted sequentially
+				continue
+			else
+				kcbench_echo 2 1 "(WRK[${this_worker}]) Compilation failed. Aborting)"
+				kcbench_echo 2 1 "Tail from the make output:"
+				kcbench_echo 2 1 "$(tail -n $(( 15 + "${KCB_jobs}" )) "${this_make_logfile}")"
+				kcbench_exit 2
+			fi
+		fi
+
+
+		# pick up the reseult
+		if (( this_counter == 0 )); then
+			[[ "${KCB_simulate}" ]] && echo "Worker ${this_worker} is discarding a result from a run started before all workers were running."
+		else
+			while read -r field result; do
+				if [[ "${field}" == "e" ]]; then
+					if [[ "${KCB_simulate}" ]]; then
+						result="$( echo "scale=2; ${result} + 1024 + ${RANDOM}%128" | bc -l )"
+					fi
+
+					echo "KCBRATE-${this_counter} ${result}" >> "${this_resultfile}"
+
+					# we got all what we want
+					break
+				fi
+			done < "${this_build_timefile}"
+		fi
+
+
+		# cleanup
+		mv -f "${this_outputdir%%/}" "${this_outputdir%%/}.lastrun"
+		rm -rf "${this_outputdir%%/}.lastrun" &
+	done
+}
+
+
+kcbench_rate_calc_result()
+{
+	local total_sum=0
+	local total_run=0
+
+
+	# iterate though the result files from all the workers
+	local counter=0
+	local errcounter=0
+	while (( counter < KCB_workers )) ; do
+		(( counter += 1 ))
+
+		# parse the file
+		while read -r job result; do
+			# ignore lines that are not marked with a result tag
+			if [[ "${job}" == "${job##KCBRATE-}" ]]; then
+				if [[ "${job}" == "KCBERROR" ]]; then
+					(( errcounter += 1 ))
+				fi
+				continue
+			fi
+
+			# go
+			(( total_run += 1 ))
+			total_sum="$(echo "${total_sum}" + "${result}" | bc -l )"
+		done < "${KCB_rate_results_fileprefix}${counter}"
+	done
+
+
+	# think about this again hard: is this really the correct and best way to calculate and print this?
+	local average
+	local rate
+	average="$(echo "avrg=(${total_sum} / ${total_run} ) + 0.005 ; scale=2; avrg/1" | bc -l)"
+	rate="$(echo "rate=(( 3600 / ( ${total_sum} / ${total_run} )) * ${KCB_workers}) + 0.005 ; scale=2; rate/1" | bc -l)"
+
+	if (( errcounter > 0 ));then
+		local tmpstring=" (building the kernel failed ${errcounter} times)"
+	fi
+	echo "${KCB_workers} workers completed ${total_run} kernels so far (avrg: ${average} s/run) with a rate of ${rate} kernels/hour${tmpstring}."
+}
+
+
+kcbench_rate_main()
+{
+	kcbench_echo 1 2 $'\n'"WARNING: Rate run still experimental. Use at your own risk!"$'\n'
+
+	if [[ ! "${KCB_simulate}" ]]; then
+		local checkinterval=60
+
+		# there should be some delay before starting the next worker, to make sure they
+		# are not all processesing the same source code in parallel. For most machines it's a
+		# good default to wait 30 seconds before the next worker is started. For machines
+		# with a lots of cores this will take too long, so calculate something roughly,
+		# as it should not matter too much anyway. As of this writing a random test machine
+		# took about 12 minutes to compile a kernel with one core, thus take 8 as base
+		if [[ ! "${KCB_cachefillrun}" ]]; then
+			local startdistance=0.1
+		elif (( KCB_nprocall < 16 )); then
+			local startdistance=30
+		else
+			# no need for floating point, this should be good enough
+			local startdistance="$(( 480 / KCB_nprocall ))"
+		fi
+	else
+		local checkinterval=5
+		local startdistance=0.75
+	fi
+
+
+	# print header with some info about the system
+	kcbench_common_sysinfo 2
+
+
+	# prepare a config
+	kcbench_common_create_config "${KCB_compile_output}worker.template/"
+
+
+	# start all the workers
+	touch "${KCB_rate_results_fileprefix}ignoreresults"
+	local counter=0
+	if (( KCB_jobs > 1 )); then
+		local tmpstring=" (each compiling with '-j ${KCB_jobs}')"
+	fi
+	echo -n "Starting ${KCB_workers} workers${tmpstring}: "
+	while (( counter < KCB_workers )) ; do
+		(( counter += 1 ))
+		kcbench_rate_worker "${counter}" "${KCB_rate_results_fileprefix}ignoreresults"  "${KCB_rate_results_fileprefix}${counter}" &
+		echo -n "."
+		sleep "${startdistance}"
+	done
+	rm -f "${KCB_rate_results_fileprefix}ignoreresults"
+	echo " All launched, starting to measure."
+
+
+	# collect the results
+	local counter=0
+	while : ; do
+		(( counter += 1 ))
+
+		# wait till all worker completed at least $counter numbers of compiles
+		while (( "$(grep "^KCBRATE-${counter}" "${KCB_rate_results_fileprefix}"* 2> /dev/null | wc -l)" < KCB_workers )) ; do
+			sleep ${checkinterval}
+		done
+
+		# print result and exit, unless running infinite
+		kcbench_rate_calc_result
+		if [[ ! "${KCB_infinite}" ]] && (( counter == KCB_iterations - 1 )) ; then
+			# we are done here, get our of this otherwise endless loop
+			break
+		fi
+	done
+
+
+	# stop the workers and give them a moment to settle down
+	pkill -P $$ || :
+	sleep 0.5
+}
+
+
+kcbench_help()
+{
+	echo "Usage: ${KCB_prog_name} [options]"
+	echo
+	echo "Compile a Linux kernel and measures the time it takes."
+	echo
+	echo "Available options:"
+	if [[ "${KCB_prog_name}" == "kcbenchrate" ]]; then
+		echo " -b, --bypass                 -- bypass start delay to launch workers faster"
+	else
+		echo " -b, --bypass                 -- bypass cache fill run and measure immediately"
+	fi
+	if [[ "${KCB_prog_name}" != "kcbenchrate" ]]; then
+		echo " -d, --detailed-results       -- print more detailed results"
+	fi
+	if [[ "${KCB_prog_name}" == "kcbenchrate" ]]; then
+		echo " -i, --iterations <int>       -- number or iterations each worker should finish"
+	else
+		echo " -i, --iterations <int>       -- number or iterations to run for each job value"
+	fi
+	echo " -j, --jobs <int> (*)         -- number of jobs to use ('make -j #')"
+	echo " -m, --modconfig              -- build using 'allmodconfig vmlinux modules'"
+	echo " -k, --kconfig <file>         -- use <file> as kernel config (overrides -m)"
+	echo " -o, --outputdir <dir>        -- compile in <dir>/kcbench/ ('make O=#')"
+	echo " -q, --quiet                  -- quiet"
+	echo " -s, --src (<version>|<dir>)  -- take Linux sources from <dir>; if not found"
+	echo "                                 try ~/.cache/kcbench/linux-<version>/ and"
+	echo "                                 /usr/share/kcbench/linux-<version>/; if still"
+	echo "                                 not found download <version> automatically."
+	echo " -v, --verbose (*)            -- increase verboselevel"
+	if [[ "${KCB_prog_name}" == "kcbenchrate" ]]; then
+		echo " -w, --workers <int>          -- number of workers to use"
+	fi
+	echo
+	echo "     --add-make-args <str>    -- pass <str> to make call ('make <str> vmlinux')"
+	echo "     --cc <exec>              -- use specified target compiler ('CC=#')"
+	echo "     --cross-compile <arch>   -- cross compile for <arch>; supported archs:"
+	echo "                                 arm, arm64, powerpc, riscv, or x86_64"
+	echo "     --crosscomp-scheme <str> -- naming scheme for cross compiler"
+	echo "     --hostcc <exec>          -- use specified host compiler ('HOSTCC=#')"
+	echo "     --infinite               -- run endlessly"
+	echo "     --llvm                   -- sets 'LLVM=1' to use clang and LLVM tools"
+	echo "     --no-download            -- never download anything automatically"
+	echo "     --savefailedlogs <dir>   -- save log from failed compilations in <dir>"
+	echo
+	echo " -h, --help                   -- show this text"
+	echo " -V, --version                -- output program version"
+	echo
+	echo "(*) -- option can be passed multiple times"
+	echo
+	{
+	echo -n "On this machine ${KCB_prog_name} by default will use a Linux kernel ${KCB_default_linux_compiled} "
+	echo -n "configured by 'make ${KCB_target_config}'. "
+	if [[ "${KCB_prog_name}" == "kcbenchrate" ]]; then
+		echo -n "It will start ${KCB_default_workers} workers that each will use one job to compile at least ${KCB_iterations} kernels using 'make -j 1 vmlinux'."
+	else
+		local morejobs="${KCB_default_jobs#* }"
+		echo -n "It first will compile this version using 'make -j ${KCB_default_jobs%% *} vmlinux' for ${KCB_iterations} times in a row; "
+		echo -n "afterwards it will repeat this with ${morejobs// /, } jobs ('make -j #') instead, to check if a different setting delivers "
+		echo -n "better results (see manpage for reasons why)."
+	fi
+	} | fmt -w 80
+	echo
+	echo "Note: defaults might change over time. Some of them also depend on your"
+	echo "machines configuration (like the number of CPU cores or the compiler being"
+	echo "used). Thus, hardcode these values when scripting kcbench."
+	echo
+}
+
+
+# go for real
+set -e
+
+# set defaults which might get overwritten my command line parameters
+kcbench_init_basic
+
+# parse cmdline options
+callcommand="${0} ${*}"
+while [ "${1}" ] ; do
+	case "${1}" in
+		-b|--bypass)
+			unset KCB_cachefillrun
+			shift
+			;;
+		-d|--detailedresults|--detailed-results)
+			shift
+			if [[ "${KCB_prog_name}" == "kcbenchrate" ]]; then
+				echo "Error: -d/--detailed-results is not supported kcbench, it's specific to kcbench for now. Aborting." >&2
+				echo
+				exit 1
+			fi
+			print_detailed_results="true"
+			;;
+		-i|--iterations)
+			shift
+			KCBUSR_iterations="${1}"
+			shift || kcbench_parse_cmdline_parmissing "-i/--iterations"
+			;;
+		-j|--jobs)
+			shift
+			KCBUSR_jobs="${KCBUSR_jobs} ${1}"
+			shift || kcbench_parse_cmdline_parmissing "-j/--jobs"
+			;;
+		-m|--modconfig|--allmodconfig)
+			shift
+			KCB_target_config="allmodconfig"
+			;;
+		-k|--kconfig)
+			shift
+			KCB_config_file="${1/#\~/${HOME}}"
+			shift || kcbench_parse_cmdline_parmissing "-k/--kconfig"
+			;;
+		-o|--outputdir|--compiledir)
+			shift
+			KCBUSR_compile_directory="${1/#\~/${HOME}}"
+			shift || kcbench_parse_cmdline_parmissing "-o/--outputdir"
+			;;
+		-q|--quiet)
+			shift
+			KCB_verbose_level="1"
+			;;
+		-s|--src)
+			shift
+			KCBUSR_compile_this="${1/#\~/${HOME}}"
+			shift || kcbench_parse_cmdline_parmissing "-s/--src"
+			;;
+		-v|--verbose)
+			shift
+			(( KCB_verbose_level++ ))
+			;;
+		-w|--workers)
+			shift
+			if [[ "${KCB_prog_name}" != "kcbenchrate" ]]; then
+				echo "Error: -w/--workers is not supported kcbench, it's specific to kcbenchrate. Aborting." >&2
+				echo
+				exit 1
+			fi
+			KCBUSR_workers="${1}"
+			shift || kcbench_parse_cmdline_parmissing "-w|--workers"
+			;;
+		--cc|--compiler)
+			shift
+			KCBUSR_compiler_target="${1}"
+			shift || kcbench_parse_cmdline_parmissing "--cc"
+			;;
+		--cross-compile)
+			shift
+			KCBUSR_cross_compile="${1}"
+			shift || kcbench_parse_cmdline_parmissing "--cross-compile"
+			;;
+		--crosscomp-scheme)
+			shift
+			KCBUSR_crosscomp_scheme="${1}"
+			shift || kcbench_parse_cmdline_parmissing "--crosscomp-scheme"
+			;;
+		--hostcc)
+			shift
+			KCBUSR_compiler_host="${1}"
+			shift || kcbench_parse_cmdline_parmissing "--hostcc"
+			;;
+		--infinite)
+			shift
+			KCB_infinite="true"
+			KCB_iterations=1
+			;;
+		--llvm)
+			export LLVM=1
+			shift
+			;;
+		--add-make-args)
+			shift
+			KCBUSR_add_make_args="${1}"
+			shift || kcbench_parse_cmdline_parmissing "--add-make-args"
+			;;
+		--nodownload|--no-download)
+			KCB_noautodownloads="true"
+			shift
+			;;
+		--savefailedlogs)
+			shift
+			KCBUSR_save_failed_compilerun_logs="${1/#\~/${HOME}}"
+			shift || kcbench_parse_cmdline_parmissing "--savefailedlogs"
+			;;
+		--force)
+			# intentionally not mentioned in help or manpage for now
+			force="true"
+			shift
+			;;
+		--logfile)
+			shift
+			KCBUSR_logfile="${1/#\~/${HOME}}"
+			shift || kcbench_parse_cmdline_parmissing "--logfile"
+
+			# check this right here to make sure it can be used immediately
+			if [[ ! -w "${KCBUSR_logfile}" ]] && ! touch "${KCBUSR_logfile}" &>/dev/null; then
+				echo "Can not write to ${KCBUSR_logfile}. Aborting ${KCB_prog_name}."
+				exit 1
+			fi
+			;;
+		--inspect-build)
+			# intentionally not mentioned in help or manpage for now
+			shift
+			KCB_inspect="build"
+			;;
+		--inspect-config)
+			# intentionally not mentioned in help or manpage for now
+			shift
+			KCB_inspect="config"
+			;;
+		--simulate)
+			# intentionally not mentioned in help or manpage for now
+			shift
+			KCB_simulate="true"
+			;;
+		--skip-compilerchecks)
+			# intentionally not mentioned in help or manpage for now
+			KCB_skip_compilerchecks="true"
+			shift
+			;;
+		-h|--help)
+			kcbench_help
+			exit 0
+			;;
+		-V|--version)
+			echo "${KCB_prog_name} ${KCB_prog_vers}"
+			exit 0
+			;;
+		*)
+			echo "Error: Unknown option '${1}'." >&2
+			echo
+			kcbench_help >&2
+			exit 1
+			;;
+	esac
+done
+
+
+# start logging
+[[ "${KCBUSR_logfile}" ]] && echo $'\n'"# $(date) -- ${callcommand} " >> "${KCBUSR_logfile}"
+unset comandline_parameters
+
+# startup checks
+kcbench_init_real
+
+# go
+if [[ "${KCB_prog_name}" == "kcbenchrate" ]]; then
+	kcbench_rate_main
+else
+	kcbench_speed_main
+fi
+
+# cleanup
+kcbench_exit 0

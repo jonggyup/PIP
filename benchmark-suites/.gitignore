@@ -1,0 +1,7 @@
+*.dat
+*.mp4
+filebench/fbtime.o
+filebench/configure~
+etc/tensorflow_model
+*.log
+

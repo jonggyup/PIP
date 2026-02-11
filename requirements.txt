@@ -1,0 +1,12 @@
+psutil
+numpy
+pandas
+scikit-learn
+joblib
+lazypredict
+matplotlib
+catboost
+tensorflow
+datasets
+transformers
+opencv-python

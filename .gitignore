@@ -1,0 +1,11 @@
+*.dat
+*.log
+*.csv
+*.bk
+*.mp4
+*-bk
+*.pyc
+*.png
+*.joblib
+train_test/catboost_info/
+estimation/budget

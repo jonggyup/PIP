@@ -1,0 +1,155 @@
+2024-03-13  Thorsten Leemhuis <linux [AT] leemhuis [DOT] info>
+	* Version 0.9.10
+		* change general default to 6.8
+		* gcc14, clang18: default to Linux 6.8, as allmodconfig fails
+		  otherwise
+
+2024-03-04  Thorsten Leemhuis <linux [AT] leemhuis [DOT] info>
+	* Version 0.9.9
+		* gcc14: default to Linux 6.1 (matches gcc13)
+		* clang18: default to Linux 6.5 (matches clang17)
+
+2023-12-12  Thorsten Leemhuis <linux [AT] leemhuis [DOT] info>
+	* Version 0.9.8
+		* Support user supplied kernel configuration files
+		  (thx to Mathias Krause)
+
+2023-09-22  Thorsten Leemhuis <linux [AT] leemhuis [DOT] info>
+
+        * Version 0.9.7
+		* clang 17: default to Linux 6.5
+
+2023-03-14  Thorsten Leemhuis <linux [AT] leemhuis [DOT] info>
+
+        * Version 0.9.6
+		* use 6.1 as new general default
+		* default to 6.1 for gcc 13 and clang16
+		* default to 5.15 for clang 14 & 15
+		* disable WERROR
+		* look for kernel sources in /usr/share/kcbench/
+
+2022-02-06  Thorsten Leemhuis <linux [AT] leemhuis [DOT] info>
+
+        * Version 0.9.5
+		* brown-paper-bag release
+
+2022-02-06  Thorsten Leemhuis <linux [AT] leemhuis [DOT] info>
+
+        * Version 0.9.4
+		* warn if user tries to compile Linux 5.10 or earlier with binutils 2.37, as its known to fail
+		* add option to ignore compiler checks
+
+2022-01-18  Thorsten Leemhuis <linux [AT] leemhuis [DOT] info>
+
+        * Version 0.9.3
+                * new general default 5.15
+                * new default for clang13 and gcc12 is 5.15, which both are able to compiled fine, which is not the case for some earlier versions
+
+2021-04-07  Thorsten Leemhuis <linux [AT] leemhuis [DOT] info>
+
+        * Version 0.9.2
+                * clang 12 fails to compile Linux 5.7, hence make it use 5.10 instead and make that the new default
+
+2020-06-22  Thorsten Leemhuis <linux [AT] leemhuis [DOT] info>
+
+        * Version 0.9.0
+                * add '--add-make-args <str>' for peope that want to pass arguments to make
+                * enhance README.md a bit and mention requirements
+
+2020-06-05  Thorsten Leemhuis <linux [AT] leemhuis [DOT] info>
+
+        * Version 0.9.0-beta.2
+                * make Linux 5.7 the general default and the default for gcc10; that version better supports gcc10 and
+                  understands LLVM=1
+                * to avoid confusion, split off the rate-run function to kcbenchrate (with its own man page), which is
+                  just a symlink to kcbench, but acts differently when called by that name
+                * convert man pages to markdown, compiled to proper man pages by the new make target "manpages"
+                  (relies on pandoc)
+                * kcbenchrate: indicate progress when starting the workers
+                * lot's of small fixes and improvements to the man pages
+
+2020-05-05  Thorsten Leemhuis <linux [AT] leemhuis [DOT] info>
+
+        * Version 0.9.0-beta.1
+                * switch to 0.9, now that kcbench has nearly all features it IMHO should have
+                * support Clang/LLVM
+                * support cross compiling
+                * support a "rate run" that uses many workers to build a lot of kernels in parallel
+                * a few options were renamed to make everything more consistent and easy to use (sorry for the trouble)
+
+2020-04-21  Thorsten Leemhuis <linux [AT] leemhuis [DOT] info>
+
+        * Version 0.5.0-beta2
+	        * make gcc version check work on multiple distros (thx
+	          GregKH for pointing out the problem)
+	        * check if there is enough free space for compiling
+	        * abort on known problematic combinations of gcc and Linux kernel version
+	        * fix a lot of ShellCheck warnings
+
+2020-04-15  Thorsten Leemhuis <linux [AT] leemhuis [DOT] info>
+
+        * Version 0.5.0-beta1
+	    News for users:
+		* new default for number of jobs used; see man page for details
+		* add "-m/--modconfig" that compiles a allmodconfig config
+		  (including modules).
+		* a new way to determine how many jobs to use
+		* Linux 5.6 is default, needed for allmodconfig build with gcc10
+		* a lot of improvements to the documentaton
+	    Other changes:
+		* call make with "--silent", to reduce output and thus interfering I/O
+		* check for flex, bison and openssl-devel as well
+		* add a Makefile with an install section
+		* a lot of small improvements and bugfixes in various areas
+
+2019-03-30  Thorsten Leemhuis <linux [AT] leemhuis [DOT] info>
+
+        * Version 0.4.1
+		* in case of gcc9 compile 4.19
+		* require and pkg-config and libelf-dev (4.19 neds it)
+
+2018-10-07  Thorsten Leemhuis <linux [AT] leemhuis [DOT] info>
+
+        * Version 0.4
+		* automatically download kernel to compile
+		* add option to prevent auto-downloads
+		* add option to specify compiler
+		* skip cache filling run by default and add option to request one
+		* trim results add add units in some places
+		* drop the warnings for background tasks
+
+2010-05-24  Thorsten Leemhuis <fedora [AT] leemhuis [DOT] info>
+        * Version 0.3.2
+		* a few output format adjustments
+		* fix cleaning up buildir
+		* create compiledir properly if specified manually
+
+2010-04-24  Thorsten Leemhuis <fedora [AT] leemhuis [DOT] info>
+        * Version 0.3.1
+		* fix two typos -- one fixes rhbz #565325
+
+2008-01-10  Thorsten Leemhuis <fedora [AT] leemhuis [DOT] info>
+
+        * Version 0.3
+		* fix typo
+		* improve some comments
+
+2008-12-03  Thorsten Leemhuis <linux [AT] leemhuis [DOT] info>
+
+        * Version 0.2
+		* add short command line options
+		* make more detailed output possible
+		* add ChangeLog and manpage, strip readme
+
+2007-10-22  Thorsten Leemhuis <fedora [AT] leemhuis [DOT] info>
+
+	* Version 0.1.2
+		* formating changes
+		* make it possible to show the elapsed time from the cache run
+
+
+2007-10-15  Thorsten Leemhuis <fedora [AT] leemhuis [DOT] info>
+
+        * Initial Version 0.1.1
+
+

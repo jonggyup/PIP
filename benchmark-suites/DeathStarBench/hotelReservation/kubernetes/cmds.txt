@@ -1,0 +1,55 @@
+#autoscale
+for d in frontend geo jaeger memcached-profile memcached-rate memcached-reserve profile rate recommendation reservation search user; do
+  kubectl autoscale deployment $d --cpu-percent=50 --min=1 --max=180
+done
+
+for d in frontend geo jaeger memcached-profile memcached-rate memcached-reserve profile rate recommendation reservation search user; do
+  kubectl patch hpa $d --type='merge' -p '{
+    "spec":{
+      "minReplicas":1,
+      "maxReplicas":180,
+      "metrics":[{"type":"Resource","resource":{"name":"cpu","target":{"type":"Utilization","averageUtilization":50}}}]
+    }
+  }'
+done
+
+for d in frontend geo jaeger memcached-profile memcached-rate memcached-reserve profile rate recommendation reservation search user; do
+  kubectl patch deployment $d --type=json -p='[
+    {
+      "op": "replace",
+      "path": "/spec/template/spec/containers/0/resources",
+      "value": {
+        "requests": { "cpu": "2000m" },
+        "limits": {}
+      }
+    }
+  ]'
+done
+
+for d in mongodb-geo mongodb-profile mongodb-rate mongodb-recommendation mongodb-reservation mongodb-user; do
+  kubectl patch deployment $d --type=json -p='[
+    {
+      "op": "replace",
+      "path": "/spec/template/spec/containers/0/resources",
+      "value": {
+        "requests": { "cpu": "1000m", "memory": "2Gi" },
+        "limits": { "cpu": "4000m", "memory": "8Gi" }
+      }
+    }
+  ]'
+done
+
+
+#letting control plane to be only control plane
+CONTROL_PLANE_NODE=$(kubectl get nodes --no-headers | grep control-plane | awk '{print $1}')
+kubectl taint nodes "$CONTROL_PLANE_NODE" node-role.kubernetes.io/control-plane=:NoSchedule --overwrite
+#checking
+
+CONTROL_PLANE_NODE=$(kubectl get nodes --no-headers | grep control-plane | awk '{print $1}')
+kubectl describe node "$CONTROL_PLANE_NODE" | grep Taints
+
+#removing
+
+CONTROL_PLANE_NODE=$(kubectl get nodes --no-headers | grep control-plane | awk '{print $1}')
+kubectl taint nodes "$CONTROL_PLANE_NODE" node-role.kubernetes.io/control-plane:NoSchedule- 
+

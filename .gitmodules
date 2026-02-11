@@ -1,0 +1,6 @@
+[submodule "benchmark-suites"]
+	path = benchmark-suites
+	url = https://github.com/jonggyup/benchmark-suites.git
+[submodule "attribution/scaphandre"]
+	path = attribution/scaphandre
+	url = https://github.com/hubblo-org/scaphandre.git
