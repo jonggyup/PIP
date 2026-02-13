@@ -17,9 +17,9 @@ run_estimation() {
 sudo cgcreate -g cpu:/critical
 CORES=$(nproc)
 PERIOD=100000
-QUOTA=$(( 70000 * CORES ))
+QUOTA=$(( 80000 * CORES ))
 
-#echo "$QUOTA $PERIOD" | sudo tee /sys/fs/cgroup/critical/cpu.max >/dev/null
+echo "$QUOTA $PERIOD" | sudo tee /sys/fs/cgroup/critical/cpu.max >/dev/null
 # Fileserver benchmark
 run_estimation "$SCRIPT_DIR/results-comp/fileserver.dat"
 pushd "$SCRIPT_DIR/benchmark-suites/filebench" > /dev/null

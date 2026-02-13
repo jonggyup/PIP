@@ -11,7 +11,7 @@ docker-compose up -d
 cgexec -g cpu:user ./wrk3 \
   -target 'http://localhost:8080/wrk2-api/home-timeline/read?user_id=1&start=0&stop=10' \
   -duration 300s -sla-ms 500 \
-  -phases '45s@200,10s@300,60s@150,15s@200,60s@100,10s@300,60s@150,15s@300,55s@200,10s@400' \
+  -phases '45s@150,10s@250,60s@150,15s@200,60s@100,10s@300,60s@150,15s@250,55s@150,10s@400' \
   -jitter-pct 10 -think-mean-ms 8
 
 docker-compose down

@@ -141,7 +141,6 @@ run_one_with_controllers() {
     sleep 10
     kill_controllers
 }
-<<END
 # ---------- Baseline (run once per workload) ----------
 # Hotel reservation
 run_one_baseline "${SCRIPT_DIR}/benchmark-suites/DeathStarBench/hotelReservation" \
@@ -171,7 +170,6 @@ run_one_baseline "${SCRIPT_DIR}/benchmark-suites/ML-training" \
 run_one_baseline "${SCRIPT_DIR}/benchmark-suites/ML-training" \
     "python3 tfidfvec.py" "tfidfvec"
 
-END
 # Social network
 run_one_baseline "${SCRIPT_DIR}/benchmark-suites/DeathStarBench/socialNetwork" \
     "./run-cgroup.sh" "social"
@@ -186,17 +184,14 @@ for os in "${OVERSUB_LEVELS[@]}"; do
         
         set_budget "$budget"
         docker volume prune -f || true # Prevent script exit if docker is busy
-<<END        
         echo "------------------------------------------------"
         echo "LOG: Starting Loop - OS: $os, Fluctuation: $fluc"
         echo "------------------------------------------------"
         # List of benchmarks to run
         run_one_with_controllers "${SCRIPT_DIR}/benchmark-suites/DeathStarBench/hotelReservation" \
             "./run-cgroup.sh" "hotel-os${os}-f${fluc}"
-END
         run_one_with_controllers "${SCRIPT_DIR}/benchmark-suites/DeathStarBench/socialNetwork" \
             "./run-cgroup.sh" "social-os${os}-f${fluc}"
-<<END
         run_one_with_controllers "${SCRIPT_DIR}/benchmark-suites/filebench" \
             "filebench -f ./workloads/fileserver.f" \
             "fileserver-os${os}-f${fluc}" \
@@ -213,7 +208,6 @@ END
 
         run_one_with_controllers "${SCRIPT_DIR}/benchmark-suites/ML-training" \
             "python3 tfidfvec.py" "tfidfvec-os${os}-f${fluc}"
-END
         echo "LOG: Finished Loop - OS: $os, Fluctuation: $fluc"
     done
 done
