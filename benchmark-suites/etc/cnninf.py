@@ -72,7 +72,7 @@ def run_inference_for_duration(run_duration):
 
     inference_count = 0
     last_demand_change = time.time()
-    demand_interval = 10 #changed from 30 to 10
+    demand_interval = 30 #changed from 30 to 10
     demand_level = 'high'
     start_time_overall = time.time()
 

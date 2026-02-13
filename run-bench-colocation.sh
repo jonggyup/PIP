@@ -20,7 +20,7 @@ group1=("hotel" "social" "fileserver" "cnninf")
 group2=("bert" "cnn" "tfidfvec")
 #group1=("social")
 
-echo "190" > ./control/budget
+echo "170" > ./control/budget
 
 # Measuring power
 (cd ./estimation/ && python3 ./estimate_CPU_power-compare-all.py 1 ) &
@@ -34,17 +34,17 @@ run_benchmark() {
     case $app2 in
         bert)
             pushd "$SCRIPT_DIR/benchmark-suites/ML-training" > /dev/null
-            cgexec -g cpu:/user python3 bert.py > "$SCRIPT_DIR/results-qos-cap/${app1}_${app2}_${suffix}_performance2.dat" 2>&1 &
+            cgexec -g cpu:/user python3 bert2.py > "$SCRIPT_DIR/results-qos-cap/${app1}_${app2}_${suffix}_performance2.dat" 2>&1 &
             popd > /dev/null
             ;;
         cnn)
             pushd "$SCRIPT_DIR/benchmark-suites/ML-training" > /dev/null
-            cgexec -g cpu:/user python3 cnn.py > "$SCRIPT_DIR/results-qos-cap/${app1}_${app2}_${suffix}_performance2.dat" 2>&1 &
+            cgexec -g cpu:/user python3 cnn2.py > "$SCRIPT_DIR/results-qos-cap/${app1}_${app2}_${suffix}_performance2.dat" 2>&1 &
             popd > /dev/null
             ;;
         tfidfvec)
             pushd "$SCRIPT_DIR/benchmark-suites/ML-training" > /dev/null
-            cgexec -g cpu:/user python3 tfidfvec.py > "$SCRIPT_DIR/results-qos-cap/${app1}_${app2}_${suffix}_performance2.dat" 2>&1 &
+            cgexec -g cpu:/user python3 tfidfvec2.py > "$SCRIPT_DIR/results-qos-cap/${app1}_${app2}_${suffix}_performance2.dat" 2>&1 &
             popd > /dev/null
             ;;
     esac

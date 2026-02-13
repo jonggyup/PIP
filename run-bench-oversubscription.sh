@@ -4,8 +4,7 @@ set +x
 
 # ---------- Config ----------
 MAX_POWER=300
-OVERSUB_LEVELS=(20 40 50 80)
-#OVERSUB_LEVELS=(0 10 20 30 40 50 60 70 80)
+OVERSUB_LEVELS=(0 10 20 30 40 50 60 70 80)
 BUDGET_FILE="./control/budget"
 
 # ---------- Prep ----------

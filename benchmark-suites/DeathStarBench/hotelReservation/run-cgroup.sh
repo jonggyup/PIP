@@ -8,7 +8,7 @@
 
 cgexec -g cpu:user ./wrk3 \
   -target 'http://0.0.0.0:5000' \
-  -duration 100s -sla-ms 400 \
+  -duration 300s -sla-ms 300 \
   -phases '10s@300,10s@600,30s@400,15s@800,60s@350,10s@2600,30s@420,15s@900,55s@380,10s@500' \
   -jitter-pct 10 -think-mean-ms 8
 

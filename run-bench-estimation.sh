@@ -19,7 +19,7 @@ CORES=$(nproc)
 PERIOD=100000
 QUOTA=$(( 70000 * CORES ))
 
-echo "$QUOTA $PERIOD" | sudo tee /sys/fs/cgroup/critical/cpu.max >/dev/null
+#echo "$QUOTA $PERIOD" | sudo tee /sys/fs/cgroup/critical/cpu.max >/dev/null
 # Fileserver benchmark
 run_estimation "$SCRIPT_DIR/results-comp/fileserver.dat"
 pushd "$SCRIPT_DIR/benchmark-suites/filebench" > /dev/null
@@ -56,7 +56,7 @@ popd > /dev/null
 # BERT benchmark
 run_estimation "$SCRIPT_DIR/results-comp/bert.dat"
 pushd "$SCRIPT_DIR/benchmark-suites/ML-training" > /dev/null
-cgexec -g cpu:/critical python3 bert.py
+cgexec -g cpu:/critical python3 bert2.py
 sleep 10
 pkill -ef estimate_CPU_power
 popd > /dev/null
