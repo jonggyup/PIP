@@ -170,11 +170,6 @@ run_one_baseline "${SCRIPT_DIR}/benchmark-suites/ML-training" \
 run_one_baseline "${SCRIPT_DIR}/benchmark-suites/ML-training" \
     "python3 tfidfvec.py" "tfidfvec"
 
-# Social network
-run_one_baseline "${SCRIPT_DIR}/benchmark-suites/DeathStarBench/socialNetwork" \
-    "./run-cgroup.sh" "social"
-
-
 # ---------- Sweep over oversubscription levels ----------
 for os in "${OVERSUB_LEVELS[@]}"; do
     for fluc in 0 25 50; do

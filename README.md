@@ -47,7 +47,7 @@ This phase uses the environment and models prepared in Phase 1 to run the three 
 
 -   **Experiment 2: Oversubscription Performance (Figure 3 and 4)**
     -   Evaluates PIP's performance under power oversubscription.
-    -   Estimated time: ~20 hours.
+    -   Estimated time: ~30 hours.
     -   ```bash
         sudo ./run-bench-oversubscription.sh
         ```
