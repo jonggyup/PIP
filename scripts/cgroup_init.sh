@@ -22,17 +22,19 @@ mkdir -p "$CRITICAL_CGROUP"
 echo "+cpuset +cpu" > "$USER_CGROUP/cgroup.subtree_control" || true
 echo "+cpuset +cpu" > "$CRITICAL_CGROUP/cgroup.subtree_control" || true
 
-# After controllers are enabled explicitly, you can safely set cpu.max
-echo "max 100000" > "$CRITICAL_CGROUP/cpu.max"
-echo "max 100000" > "$USER_CGROUP/cpu.max"
-
-# Determine total CPUs
+# Determine total CPUs early so we can use it in our math
 TOTAL_CPUS=$(lscpu -p=cpu | grep -E "^[0-9]" | wc -l)
 ALL_CPUS="0-$((TOTAL_CPUS - 1))"
+
+# Calculate the new max value: 100 * cores * 100,000
+CPU_MAX_VAL=$(( 100 * TOTAL_CPUS * 100000 ))
+
+# Set cpu.max using the calculated value
+echo "$CPU_MAX_VAL 100000" > "$CRITICAL_CGROUP/cpu.max"
+echo "$CPU_MAX_VAL 100000" > "$USER_CGROUP/cpu.max"
 
 # Restore CPU affinity (all cores)
 echo "$ALL_CPUS" > "$CRITICAL_CGROUP/cpuset.cpus"
 echo "$ALL_CPUS" > "$USER_CGROUP/cpuset.cpus"
 
-echo "Restored CPU affinity and cpu.max to unlimited for both cgroups."
-
+echo "Restored CPU affinity and set cpu.max to $CPU_MAX_VAL for both cgroups."

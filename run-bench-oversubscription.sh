@@ -141,6 +141,10 @@ run_one_with_controllers() {
     sleep 10
     kill_controllers
 }
+
+# Measuring power
+(cd ./estimation/ && python3 ./estimate_CPU_power-compare-all.py 1 ) &
+
 # ---------- Baseline (run once per workload) ----------
 # Hotel reservation
 run_one_baseline "${SCRIPT_DIR}/benchmark-suites/DeathStarBench/hotelReservation" \
@@ -169,6 +173,8 @@ run_one_baseline "${SCRIPT_DIR}/benchmark-suites/ML-training" \
 # tfidfvec
 run_one_baseline "${SCRIPT_DIR}/benchmark-suites/ML-training" \
     "python3 tfidfvec.py" "tfidfvec"
+
+pkill -ef estimate_CPU_power-compare-all
 
 # ---------- Sweep over oversubscription levels ----------
 for os in "${OVERSUB_LEVELS[@]}"; do

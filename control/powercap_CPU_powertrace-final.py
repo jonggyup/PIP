@@ -649,7 +649,7 @@ def run_stress_test():
     global predictive_feature_map, target_power, calibration_offset, used_map, full_mode
 
     calibration_offset = 0
-    current_bandwidth = 99  # Starting bandwidth value
+    current_bandwidth = 100  # Starting bandwidth value
     sample_sec = float(sys.argv[1]) if len(sys.argv) > 1 else 1.0
 
     while True:
