@@ -14,6 +14,7 @@ run_estimation() {
     popd > /dev/null
 }
 
+./scripts/cgroup_init.sh
 sudo cgcreate -g cpu:/critical
 CORES=$(nproc)
 PERIOD=100000
