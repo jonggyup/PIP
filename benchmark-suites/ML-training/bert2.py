@@ -21,7 +21,7 @@ from transformers import (
 import inspect
 
 cpu_count = os.cpu_count() or 1
-torch.set_num_threads(min(32, cpu_count))
+torch.set_num_threads(min(20, cpu_count))
 if hasattr(torch, "set_num_interop_threads"):
     torch.set_num_interop_threads(min(8, max(2, cpu_count // 4)))
 

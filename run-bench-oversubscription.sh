@@ -101,6 +101,7 @@ run_one_baseline() {
     cgexec -g cpu:/user $benchmark_command &> "${OUTPUT_DIR}/${output_tag}-baseline-result.dat"
     popd >/dev/null
     sleep 10
+    echo 1 > /sys/fs/cgroup/user/cgroup.kill
 }
 
 # ---------- Benchmark runners ----------
@@ -126,6 +127,7 @@ run_one_with_controllers() {
     stop_budget_fluctuation "${CURRENT_BUDGET}"
     sleep 10
     kill_controllers
+    echo 1 > /sys/fs/cgroup/user/cgroup.kill
 
     # --- Powertrace Run ---
     ./control/rapl-recover.sh || true
@@ -140,6 +142,7 @@ run_one_with_controllers() {
     stop_budget_fluctuation "${CURRENT_BUDGET}"
     sleep 10
     kill_controllers
+    echo 1 > /sys/fs/cgroup/user/cgroup.kill
 }
 
 # Measuring power

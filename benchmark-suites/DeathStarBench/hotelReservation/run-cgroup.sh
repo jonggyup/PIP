@@ -9,7 +9,7 @@
 cgexec -g cpu:user ./wrk3 \
   -target 'http://0.0.0.0:5000' \
   -duration 300s -sla-ms 300 \
-  -phases '10s@300,10s@600,30s@400,15s@800,60s@350,10s@2600,30s@420,15s@900,55s@380,10s@500' \
+  -phases '10s@300,10s@600,30s@300,10s@800,40s@250,10s@900,40s@220,15s@900,55s@280,10s@500' \
   -jitter-pct 10 -think-mean-ms 8
 
 /usr/local/bin/docker-compose down
