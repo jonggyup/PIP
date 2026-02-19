@@ -26,7 +26,7 @@ if hasattr(torch, "set_num_interop_threads"):
     torch.set_num_interop_threads(min(8, max(2, cpu_count // 4)))
 
 BASE_TRAIN = 1000
-BASE_TEST  = 1000
+BASE_TEST  = 10000
 BASE_SEQ   = 64
 
 def parse_args():
