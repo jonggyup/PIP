@@ -182,3 +182,5 @@ These scripts run the benchmarks under the control of the two power management s
 -   `./scripts/get_system_info.sh`: Gathers detailed system information into a log file for debugging.
 -   `./scripts/show_versions.sh`: Displays the versions of all critical software components.
 
+## Zenodo link
+https://zenodo.org/records/18804291
