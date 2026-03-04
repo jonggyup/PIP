@@ -10,3 +10,4 @@ tensorflow
 datasets
 transformers
 opencv-python
+seaborn
